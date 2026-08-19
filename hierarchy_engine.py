@@ -91,6 +91,19 @@ class ComplianceResult:
         return self.valid_rows == 0
 
     @property
+    def overall_compliance_pct(self) -> float:
+        """Compliance against *every* evaluated row, including the ones excluded
+        for a blank chain column (those count as non-compliant here). This is
+        the percentage shown to the user. `compliance_pct` (valid-rows-only,
+        i.e. nulls excluded from both numerator and denominator) remains the
+        internal metric used to decide whether a hierarchy chain qualifies
+        during detection — changing that would make detection threshold
+        gating sensitive to how much null data a chain happens to have."""
+        if self.total_rows == 0:
+            return 0.0
+        return 100.0 * self.compliant_rows / self.total_rows
+
+    @property
     def avg_group_size(self) -> float:
         if self.distinct_leaf_values == 0:
             return 0.0

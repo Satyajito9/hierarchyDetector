@@ -7,6 +7,7 @@ import streamlit as st
 
 from hierarchy_engine import (
     BadRecordReason,
+    ChainResult,
     ColumnProfile,
     ComplianceResult,
     DetectResult,
@@ -159,6 +160,44 @@ def render_hierarchy_diagram(
             st.markdown(converge_connector_svg(len(level.columns)), unsafe_allow_html=True)
 
 
+def render_download_controls(full_df: pd.DataFrame, exc_df: pd.DataFrame, key_prefix: str) -> None:
+    """Shared download controls: an 'include reason' toggle plus two download
+    buttons — full data (every row) or exception rows only — both honoring
+    that toggle. Both frames must already carry a 'Bad Record Reason' column."""
+    include_reason = st.checkbox(
+        "Include bad record reason",
+        value=True,
+        key=f"{key_prefix}_dl_include_reason",
+        help="On: include the Bad Record Reason column in the download. Off: drop it.",
+    )
+    full_export = full_df if include_reason else full_df.drop(columns=["Bad Record Reason"])
+    exc_export = exc_df if include_reason else exc_df.drop(columns=["Bad Record Reason"])
+
+    st.caption(f"{len(full_df):,} rows total · {len(exc_df):,} exception rows")
+    # Stacked (not side-by-side columns) so both buttons span the same full
+    # width regardless of label length — side-by-side columns kept coming out
+    # different sizes because the longer label wrapped inside its half-width
+    # column while the shorter one didn't.
+    st.download_button(
+        "Full data",
+        full_export.to_csv(index=False).encode("utf-8"),
+        file_name=f"{key_prefix}_full_data.csv",
+        mime="text/csv",
+        icon="📄",
+        key=f"{key_prefix}_dl_full_btn",
+        width='stretch',
+    )
+    st.download_button(
+        "Exceptions only",
+        exc_export.to_csv(index=False).encode("utf-8"),
+        file_name=f"{key_prefix}_exceptions.csv",
+        mime="text/csv",
+        icon="⚠️",
+        key=f"{key_prefix}_dl_exc_btn",
+        width='stretch',
+    )
+
+
 def render_bad_record_table(df: pd.DataFrame, overall: ComplianceResult, key_prefix: str) -> None:
     """Exception view shared by Detect and Validate: one table with every bad
     record — rows that violate the chain, plus rows excluded for a blank
@@ -167,6 +206,7 @@ def render_bad_record_table(df: pd.DataFrame, overall: ComplianceResult, key_pre
     sub-table."""
     bad_index = sorted(set(overall.violation_index) | set(overall.null_excluded_index))
 
+    st.markdown("##### 🚩 Exception Report")
     if not bad_index:
         st.success("No violations — every evaluated row matches this hierarchy.")
         return
@@ -175,29 +215,50 @@ def render_bad_record_table(df: pd.DataFrame, overall: ComplianceResult, key_pre
         reasons = bad_record_reasons(df, overall)
         reason_text = {i: format_bad_record_reason(r) for i, r in reasons.items()}
 
-        exc_df = df.loc[bad_index].copy()
-        exc_df.insert(0, "row_num", [i + HEADER_LINE_OFFSET for i in bad_index])
-        exc_df["Bad Record Reason"] = [reason_text[i] for i in bad_index]
+        full_df = df.copy()
+        full_df.insert(0, "row_num", [i + HEADER_LINE_OFFSET for i in df.index])
+        full_df["Bad Record Reason"] = [reason_text.get(i, "") for i in df.index]
+        exc_df = full_df.loc[bad_index]
 
         popover_col, _ = st.columns([1, 5])
         with popover_col:
-            with st.popover("⬇ Download"):
-                include_reason = st.checkbox(
-                    "Include bad record reason",
-                    value=True,
-                    key=f"{key_prefix}_dl_include_reason",
-                    help="On: download the table as shown, including the Bad Record "
-                    "Reason column. Off: drop that column from the download.",
-                )
-                export_df = exc_df if include_reason else exc_df.drop(columns=["Bad Record Reason"])
-                st.caption(f"{len(export_df):,} rows")
-                st.download_button(
-                    "Download CSV",
-                    export_df.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{key_prefix}_bad_records.csv",
-                    mime="text/csv",
-                    key=f"{key_prefix}_dl_btn",
-                )
+            with st.popover("Download"):
+                render_download_controls(full_df, exc_df, key_prefix)
+
+        st.dataframe(exc_df, hide_index=True, width='stretch', height=250)
+
+
+def render_consolidated_bad_records(df: pd.DataFrame, hierarchies: List[ChainResult], key_prefix: str) -> None:
+    """Consolidated exception view across every detected hierarchy: one row
+    per bad record, with the reasons from each hierarchy it violates joined
+    into a single comma-separated Bad Record Reason cell (prefixed 'H1:',
+    'H2:', ... so the reasons stay attributable when a row breaks more than
+    one hierarchy)."""
+    per_row_reasons: Dict[object, List[str]] = {}
+    for h_idx, chain in enumerate(hierarchies, start=1):
+        reasons = bad_record_reasons(df, chain.overall)
+        for i, r in reasons.items():
+            per_row_reasons.setdefault(i, []).append(f"H{h_idx}: {format_bad_record_reason(r)}")
+
+    bad_index = sorted(per_row_reasons.keys())
+
+    st.markdown("##### 🚩 Exception Report (across all detected hierarchies)")
+    if not bad_index:
+        st.success("No violations — every evaluated row matches every detected hierarchy.")
+        return
+
+    with st.expander(f"Exception rows ({len(bad_index):,} rows that break at least one detected hierarchy)"):
+        reason_text = {i: ", ".join(parts) for i, parts in per_row_reasons.items()}
+
+        full_df = df.copy()
+        full_df.insert(0, "row_num", [i + HEADER_LINE_OFFSET for i in df.index])
+        full_df["Bad Record Reason"] = [reason_text.get(i, "") for i in df.index]
+        exc_df = full_df.loc[bad_index]
+
+        popover_col, _ = st.columns([1, 5])
+        with popover_col:
+            with st.popover("Download"):
+                render_download_controls(full_df, exc_df, key_prefix)
 
         st.dataframe(exc_df, hide_index=True, width='stretch', height=250)
 
@@ -208,13 +269,14 @@ def render_chain_result(
     profile_map: Dict[str, ColumnProfile],
     key_prefix: str,
     near_misses: Optional[List[Tuple[str, float, float, str]]] = None,
+    show_bad_records: bool = True,
 ) -> None:
     overall = levels[-1].ancestor_compliance
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Compliance", f"{overall.compliance_pct:.1f}%")
-    m2.metric("Compliant rows", f"{overall.compliant_rows:,} / {overall.valid_rows:,}")
-    m3.metric("Rows skipped (missing values)", f"{overall.null_excluded_rows:,}")
+    m1.metric("Compliance", f"{overall.overall_compliance_pct:.1f}%")
+    m2.metric("Compliant rows", f"{overall.compliant_rows:,} / {overall.total_rows:,}")
+    m3.metric("Rows with missing values", f"{overall.null_excluded_rows:,}")
     m4.metric("Levels", f"{len(levels)}")
 
     st.markdown("##### Hierarchy structure")
@@ -240,7 +302,8 @@ def render_chain_result(
             nm_df = nm_df.sort_values("Best compliance %", ascending=False)
             st.dataframe(nm_df, hide_index=True, width='stretch')
 
-    render_bad_record_table(df, overall, key_prefix)
+    if show_bad_records:
+        render_bad_record_table(df, overall, key_prefix)
 
 
 def chain_summary_label(levels: List[LevelResult]) -> str:
@@ -253,27 +316,20 @@ def chain_summary_label(levels: List[LevelResult]) -> str:
 
 MAX_HIERARCHIES_TO_FIND = 8
 
+# Fixed internally; not exposed in the UI. Used only to decide which chains
+# qualify as a detected hierarchy — the displayed Compliance % (see
+# ComplianceResult.overall_compliance_pct) is unaffected by this value.
+DETECT_COMPLIANCE_THRESHOLD = 98.0
+
 
 def render_detect(file_key: str, df: pd.DataFrame) -> None:
-    thr_col, _ = st.columns([1, 3])
-    with thr_col:
-        threshold = st.number_input(
-            "Compliance threshold (%)",
-            min_value=50.0,
-            max_value=100.0,
-            value=100.0,
-            step=1.0,
-            key=f"thr_{file_key}",
-            help="A hierarchy level is accepted only if at least this % of rows satisfy it.",
-        )
-
-    result = cached_detect(df, float(threshold), MAX_HIERARCHIES_TO_FIND)
+    result = cached_detect(df, DETECT_COMPLIANCE_THRESHOLD, MAX_HIERARCHIES_TO_FIND)
     profile_map = {p.name: p for p in result.profiles}
 
     if not result.hierarchies:
         st.warning(
-            "No column chain met the compliance threshold. Try lowering the threshold, "
-            "or use Validate Hierarchy to inspect a specific combination of columns."
+            "No column chain met the compliance threshold. Try Validate Hierarchy "
+            "to inspect a specific combination of columns instead."
         )
     else:
         tab_labels = [f"Hierarchy {idx + 1}" for idx in range(len(result.hierarchies))]
@@ -287,7 +343,10 @@ def render_detect(file_key: str, df: pd.DataFrame) -> None:
                     profile_map,
                     key_prefix=f"{file_key}_h{idx + 1}",
                     near_misses=chain_result.near_misses,
+                    show_bad_records=False,
                 )
+
+        render_consolidated_bad_records(df, result.hierarchies, key_prefix=f"{file_key}_detect")
 
     if result.unused_columns:
         st.markdown("##### Columns not part of any detected hierarchy")
@@ -407,26 +466,32 @@ def render_file_section(file_key: str, filename: str, df: pd.DataFrame) -> None:
 
     mode = st.radio(
         "What do you want to do?",
-        ["Detect Hierarchy", "Validate Hierarchy"],
+        ["🔍 Detect Hierarchy", "✅ Validate Hierarchy"],
         key=f"mode_{file_key}",
         horizontal=True,
     )
 
-    if mode == "Detect Hierarchy":
+    if mode == "🔍 Detect Hierarchy":
         render_detect(file_key, df)
     else:
         render_validate(file_key, df)
 
 
 def main() -> None:
-    st.title("Hierarchy Detector & Validator")
-    st.write(
-        "Upload one or more CSV files. Each file is analyzed independently — "
-        "you can detect likely hierarchies in it, or validate a hierarchy you specify."
+    st.title("📊 Hierarchy Detector & Validator")
+    st.markdown(
+        "Upload one or more CSV files below to check column-based hierarchies "
+        "(e.g. *Country → State → City*). For each file you can:\n"
+        "- 🔍 **Detect Hierarchy** — automatically finds likely parent/child column chains "
+        "and scores how well the data complies with each one.\n"
+        "- ✅ **Validate Hierarchy** — pick the exact columns and levels you have in mind "
+        "and check how well the data actually follows that structure.\n"
+        "- 🚩 Both modes give you a downloadable **exception report** pinpointing which rows "
+        "break the hierarchy, and exactly which column/value differs and against which row."
     )
 
     uploaded_files = st.file_uploader(
-        "Upload CSV file(s)", type=["csv"], accept_multiple_files=True
+        "📁 Upload CSV file(s)", type=["csv"], accept_multiple_files=True
     )
 
     if not uploaded_files:
