@@ -6,15 +6,21 @@ import pandas as pd
 import streamlit as st
 
 from hierarchy_engine import (
+    BadRecordReason,
     ColumnProfile,
+    ComplianceResult,
     DetectResult,
     LevelResult,
     ValidateResult,
+    bad_record_reasons,
     detect_hierarchies,
     profile_columns,
-    top_violations,
     validate_hierarchy,
 )
+
+# Original-file row number shown to users (`row_num`): the CSV header line is
+# counted as line 1, so the first data row (df index 0) is line 2.
+HEADER_LINE_OFFSET = 2
 
 st.set_page_config(page_title="Hierarchy Detector & Validator", layout="wide")
 
@@ -87,19 +93,19 @@ def converge_connector_svg(n_boxes: int, box_w: int = BOX_W, link_w: int = LINK_
 # Cached wrappers around the engine
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=20, ttl=3600)
 def load_csv(file_bytes: bytes, filename: str) -> pd.DataFrame:
     import io
 
     return pd.read_csv(io.BytesIO(file_bytes))
 
 
-@st.cache_data(show_spinner="Detecting hierarchies...")
+@st.cache_data(show_spinner="Detecting hierarchies...", max_entries=20, ttl=3600)
 def cached_detect(df: pd.DataFrame, threshold: float, max_hierarchies: int) -> DetectResult:
     return detect_hierarchies(df, threshold=threshold, max_hierarchies=max_hierarchies)
 
 
-@st.cache_data(show_spinner="Validating hierarchy...")
+@st.cache_data(show_spinner="Validating hierarchy...", max_entries=20, ttl=3600)
 def cached_validate(df: pd.DataFrame, level_groups: Tuple[Tuple[str, ...], ...]) -> ValidateResult:
     return validate_hierarchy(df, level_groups)
 
@@ -123,7 +129,17 @@ def render_column_profile(df: pd.DataFrame) -> None:
         }
         for p in profiles
     ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+
+
+def format_bad_record_reason(reason: BadRecordReason) -> str:
+    if reason.kind == "blank":
+        return f"Blank {reason.detail}"
+    example_row_num = reason.example_index + HEADER_LINE_OFFSET
+    if not reason.diffs:
+        return f"Different {reason.detail} than row {example_row_num}"
+    pairs = ", ".join(f"{col}: {val}" for col, val in reason.diffs)
+    return f"{pairs} in row {example_row_num}"
 
 
 def render_hierarchy_diagram(
@@ -141,6 +157,49 @@ def render_hierarchy_diagram(
 
         if i < len(levels) - 1:
             st.markdown(converge_connector_svg(len(level.columns)), unsafe_allow_html=True)
+
+
+def render_bad_record_table(df: pd.DataFrame, overall: ComplianceResult, key_prefix: str) -> None:
+    """Exception view shared by Detect and Validate: one table with every bad
+    record — rows that violate the chain, plus rows excluded for a blank
+    chain column — each with all of the file's columns, a leading row_num,
+    and a Bad Record Reason explaining why it's there. No violation-ranking
+    sub-table."""
+    bad_index = sorted(set(overall.violation_index) | set(overall.null_excluded_index))
+
+    if not bad_index:
+        st.success("No violations — every evaluated row matches this hierarchy.")
+        return
+
+    with st.expander(f"Exception rows ({len(bad_index):,} rows that break this hierarchy)"):
+        reasons = bad_record_reasons(df, overall)
+        reason_text = {i: format_bad_record_reason(r) for i, r in reasons.items()}
+
+        exc_df = df.loc[bad_index].copy()
+        exc_df.insert(0, "row_num", [i + HEADER_LINE_OFFSET for i in bad_index])
+        exc_df["Bad Record Reason"] = [reason_text[i] for i in bad_index]
+
+        popover_col, _ = st.columns([1, 5])
+        with popover_col:
+            with st.popover("⬇ Download"):
+                include_reason = st.checkbox(
+                    "Include bad record reason",
+                    value=True,
+                    key=f"{key_prefix}_dl_include_reason",
+                    help="On: download the table as shown, including the Bad Record "
+                    "Reason column. Off: drop that column from the download.",
+                )
+                export_df = exc_df if include_reason else exc_df.drop(columns=["Bad Record Reason"])
+                st.caption(f"{len(export_df):,} rows")
+                st.download_button(
+                    "Download CSV",
+                    export_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{key_prefix}_bad_records.csv",
+                    mime="text/csv",
+                    key=f"{key_prefix}_dl_btn",
+                )
+
+        st.dataframe(exc_df, hide_index=True, width='stretch', height=250)
 
 
 def render_chain_result(
@@ -179,26 +238,9 @@ def render_chain_result(
             nm_df["Best compliance %"] = nm_df["Best compliance %"].round(1)
             nm_df["Avg rows/value"] = nm_df["Avg rows/value"].round(1)
             nm_df = nm_df.sort_values("Best compliance %", ascending=False)
-            st.dataframe(nm_df, hide_index=True, use_container_width=True)
+            st.dataframe(nm_df, hide_index=True, width='stretch')
 
-    viol_idx = overall.violation_index
-    if len(viol_idx) > 0:
-        with st.expander(f"Exception rows ({len(viol_idx):,} rows that break this hierarchy)"):
-            tv = top_violations(df, overall.leaf, viol_idx, top_n=10)
-            st.write(f"'{overall.leaf}' values most responsible for violations:")
-            st.dataframe(tv, hide_index=True, use_container_width=True)
-            st.write("Full exception rows:")
-            exc_df = df.loc[viol_idx, [c for lvl in levels for c in lvl.columns]]
-            st.dataframe(exc_df, use_container_width=True, height=250)
-            st.download_button(
-                "Download exception rows (CSV)",
-                exc_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"{key_prefix}_exceptions.csv",
-                mime="text/csv",
-                key=f"dl_{key_prefix}",
-            )
-    else:
-        st.success("No violations — every evaluated row matches this hierarchy.")
+    render_bad_record_table(df, overall, key_prefix)
 
 
 def chain_summary_label(levels: List[LevelResult]) -> str:
@@ -209,9 +251,12 @@ def chain_summary_label(levels: List[LevelResult]) -> str:
 # Detect mode
 # ---------------------------------------------------------------------------
 
+MAX_HIERARCHIES_TO_FIND = 8
+
+
 def render_detect(file_key: str, df: pd.DataFrame) -> None:
-    c1, c2 = st.columns([1, 1])
-    with c1:
+    thr_col, _ = st.columns([1, 3])
+    with thr_col:
         threshold = st.number_input(
             "Compliance threshold (%)",
             min_value=50.0,
@@ -221,12 +266,8 @@ def render_detect(file_key: str, df: pd.DataFrame) -> None:
             key=f"thr_{file_key}",
             help="A hierarchy level is accepted only if at least this % of rows satisfy it.",
         )
-    with c2:
-        max_h = st.number_input(
-            "Max hierarchies to find", min_value=1, max_value=5, value=5, step=1, key=f"maxh_{file_key}"
-        )
 
-    result = cached_detect(df, float(threshold), int(max_h))
+    result = cached_detect(df, float(threshold), MAX_HIERARCHIES_TO_FIND)
     profile_map = {p.name: p for p in result.profiles}
 
     if not result.hierarchies:
@@ -257,7 +298,7 @@ def render_detect(file_key: str, df: pd.DataFrame) -> None:
             st.dataframe(
                 pd.DataFrame(result.excluded_columns, columns=["Column", "Reason"]),
                 hide_index=True,
-                use_container_width=True,
+                width='stretch',
             )
 
 
@@ -267,10 +308,11 @@ def render_detect(file_key: str, df: pd.DataFrame) -> None:
 
 def render_validate(file_key: str, df: pd.DataFrame) -> None:
     st.write(
-        "Tick the columns that make up the hierarchy you want to check. Level (1 = top / "
-        "broadest level) fills in automatically in the order you tick columns — edit it "
-        "yourself if you want a different order. Give two columns the **same** level "
-        "number to treat them as parallel (1:1) columns at that level."
+        "Tick the columns that make up the hierarchy you want to check. Level (1 = leaf level) "
+        "fills in automatically — each newly ticked column becomes the new "
+        "top level, pushing previously ticked columns one level down — edit it yourself if "
+        "you want a different order. Give two columns the **same** level number to treat "
+        "them as parallel (1:1) columns at that level."
     )
 
     editor_key = f"validate_editor_{file_key}"
@@ -296,23 +338,26 @@ def render_validate(file_key: str, df: pd.DataFrame) -> None:
             "Level": st.column_config.NumberColumn(min_value=1, step=1),
         },
         hide_index=True,
-        use_container_width=True,
+        width='stretch',
         key=editor_key,
     )
 
     # Invariant enforced every run: unticked rows always show a blank Level;
-    # a just-ticked row (Include=True, Level still blank) gets the next
-    # sequential number after whatever's already assigned.
+    # a just-ticked row (Include=True, Level still blank) becomes the new top
+    # level (1), and every already-assigned level shifts down to make room —
+    # i.e. new columns are inserted upstream (as the new broadest level)
+    # rather than appended downstream (as the new narrowest level).
     levels = edited["Level"].astype("Int64")
     include = edited["Include"]
     levels = levels.where(include, other=pd.NA)
 
     needs_level = include & levels.isna()
     if needs_level.any():
-        assigned = levels[include & ~levels.isna()]
-        base_level = int(assigned.max()) if not assigned.empty else 0
-        for offset, idx in enumerate(levels.index[needs_level], start=1):
-            levels.loc[idx] = base_level + offset
+        new_idx = list(levels.index[needs_level])
+        already_assigned_idx = levels.index[include & ~levels.isna()]
+        levels.loc[already_assigned_idx] = levels.loc[already_assigned_idx] + len(new_idx)
+        for offset, idx in enumerate(new_idx, start=1):
+            levels.loc[idx] = offset
 
     updated = edited.copy()
     updated["Level"] = levels
@@ -355,7 +400,7 @@ def render_file_section(file_key: str, filename: str, df: pd.DataFrame) -> None:
     st.caption(f"{df.shape[0]:,} rows × {df.shape[1]} columns")
 
     with st.expander("Preview data (first 20 rows)"):
-        st.dataframe(df.head(20), use_container_width=True)
+        st.dataframe(df.head(20), width='stretch')
 
     with st.expander("Column profile"):
         render_column_profile(df)
