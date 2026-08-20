@@ -39,6 +39,7 @@ no business logic or rendering logic lives in `app.py` itself.
 | `VERSION` | Single source of truth for the app version — read by `hierarchy_detector/__init__.py`, shown as a subscript next to the page title, and baked into the Docker image label. |
 | `CHANGELOG.md` | Keep-a-Changelog-style history, updated alongside `VERSION` bumps. |
 | `Dockerfile` | Single-stage build (`python:3.11-slim`), installs `requirements.txt`, copies `VERSION`, `hierarchy_detector/`, and `app.py`, exposes port 8501. Takes an `APP_VERSION` build arg set as an OCI image-version label. |
+| `runtime.txt` | Pins Python 3.11 for platforms that read it (e.g. Streamlit Community Cloud), so the deployed interpreter matches what `Dockerfile` and local development already use, instead of whatever the platform's own default happens to be. |
 | `azure-pipelines.yml` | CI/CD scaffold written for an **Azure App Service** target (build → push to ACR → deploy). Placeholders for the ACR name / service connections / app name are still unfilled — this pipeline is Azure-App-Service-specific and would need to be replaced, not reused as-is, if the target hosting mechanism is different (e.g. Kubernetes). Note: this file is referenced here but is not currently present in the repo. |
 
 ## Data flow / statelessness

@@ -7,6 +7,11 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [1.2.0] - 2026-08-20
 
+### Added
+- `runtime.txt` pinning Python 3.11, so platforms that read it (e.g.
+  Streamlit Community Cloud) use the same interpreter version as
+  `Dockerfile` and local development, instead of their own default.
+
 ### Fixed
 - A corrupted/unreadable uploaded file no longer surfaces its raw parse
   exception as a page-level error and no longer lingers in session state
