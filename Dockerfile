@@ -1,11 +1,17 @@
 FROM python:3.11-slim
 
+# Pass with: docker build --build-arg APP_VERSION=$(cat VERSION) -t hierarchydetector:$(cat VERSION) .
+ARG APP_VERSION=0.0.0
+LABEL org.opencontainers.image.version="${APP_VERSION}"
+
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY hierarchy_engine.py app.py ./
+COPY VERSION ./VERSION
+COPY hierarchy_detector ./hierarchy_detector
+COPY app.py ./
 
 EXPOSE 8501
 

@@ -25,12 +25,19 @@ session / container restart.
 
 ## Code layout
 
-| File | Role |
+The app is a `hierarchy_detector/` package plus a thin `app.py` entry point —
+no business logic or rendering logic lives in `app.py` itself.
+
+| Path | Role |
 |---|---|
-| `app.py` | UI layer — file upload, mode selection, rendering tables/diagrams, CSV export. All Streamlit-specific code lives here. |
-| `hierarchy_engine.py` | Pure computation layer — column profiling, the exhaustive hierarchy-detection algorithm, compliance validation, bad-record-reason generation. No Streamlit or I/O dependency; independently testable. |
-| `Dockerfile` | Single-stage build (`python:3.11-slim`), installs `requirements.txt`, copies the two files above, exposes port 8501. |
-| `azure-pipelines.yml` | CI/CD scaffold written for an **Azure App Service** target (build → push to ACR → deploy). Placeholders for the ACR name / service connections / app name are still unfilled — this pipeline is Azure-App-Service-specific and would need to be replaced, not reused as-is, if the target hosting mechanism is different (e.g. Kubernetes). |
+| `app.py` | Entry point / orchestrator only: page config, file-upload wiring, tab layout. Delegates everything else to `hierarchy_detector`. |
+| `hierarchy_detector/__init__.py` | Exposes `__version__`, read from the repo-root `VERSION` file. |
+| `hierarchy_detector/core/` | Pure computation layer — no Streamlit or I/O dependency; independently testable. Split by concern: `profiling.py` (column stats), `compliance.py` (chain compliance calculation), `bad_records.py` (per-row violation reasons), `levels.py` (shared level representation), `detect.py` (automatic hierarchy detection), `validate.py` (user-specified hierarchy validation). |
+| `hierarchy_detector/ui/` | Streamlit rendering layer, one concern per module: `styles.py`/`diagram.py` (hierarchy diagram), `data_loading.py` (cached wrappers around `core`), `upload.py` (upload-to-DataFrame wiring), `formatting.py`, `downloads.py`, `reports.py` (exception reports), `profile_view.py`, `chain_view.py`, `detect_view.py`, `validate_view.py`, `file_section.py`, `footer.py` (version footer). |
+| `VERSION` | Single source of truth for the app version — read by `hierarchy_detector/__init__.py`, shown in the app footer, and baked into the Docker image label. |
+| `CHANGELOG.md` | Keep-a-Changelog-style history, updated alongside `VERSION` bumps. |
+| `Dockerfile` | Single-stage build (`python:3.11-slim`), installs `requirements.txt`, copies `VERSION`, `hierarchy_detector/`, and `app.py`, exposes port 8501. Takes an `APP_VERSION` build arg set as an OCI image-version label. |
+| `azure-pipelines.yml` | CI/CD scaffold written for an **Azure App Service** target (build → push to ACR → deploy). Placeholders for the ACR name / service connections / app name are still unfilled — this pipeline is Azure-App-Service-specific and would need to be replaced, not reused as-is, if the target hosting mechanism is different (e.g. Kubernetes). Note: this file is referenced here but is not currently present in the repo. |
 
 ## Data flow / statelessness
 
@@ -146,6 +153,24 @@ access control today:
    Easy Auth, an API gateway doing OIDC) — the latter is usually simpler
    and keeps auth out of the app entirely. Worth asking the ops team which
    of these their internal hosting mechanism already provides.
+
+---
+
+## Versioning and releases
+
+The app uses [Semantic Versioning](https://semver.org/). To cut a release:
+
+1. Bump the version string in the repo-root `VERSION` file.
+2. Add an entry to `CHANGELOG.md` describing what changed, under that version.
+3. Build the Docker image with the version baked in:
+   ```
+   docker build --build-arg APP_VERSION=$(cat VERSION) -t hierarchydetector:$(cat VERSION) .
+   ```
+4. Optionally tag the commit `git tag vX.Y.Z` to tie the image back to an exact commit.
+
+The running version is visible in two places without needing repo access:
+the app footer (bottom of the page), and `docker inspect` on the running
+container (`org.opencontainers.image.version` label).
 
 ---
 
