@@ -29,3 +29,11 @@ restructure of the codebase into a modular, deployable layout.
 - Docker image now takes an `APP_VERSION` build arg and sets it as the
   `org.opencontainers.image.version` OCI label, so `docker inspect` on a
   running container reveals which version it's running.
+
+### Features Added
+- Consolidated exceptions from all detected hierarchies in exception report
+- Added summary and contact email for better user adaptability
+- Download option now has 2 options, 1. download full data, 2. download exceptions only
+
+### Bugs fixed
+- Fixed %compaliance calculation; considers total rows including null rows as denominator now
