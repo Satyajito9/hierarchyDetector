@@ -4,15 +4,21 @@ computation) and hierarchy_detector/ui (Streamlit rendering)."""
 
 import streamlit as st
 
-from hierarchy_detector.ui import collect_uploaded_files, render_file_section, render_version_footer
+from hierarchy_detector.ui import (
+    collect_uploaded_files,
+    render_file_section,
+    render_header_with_version,
+    render_upload_trigger,
+    get_uploaded_file_sep_pairs,
+)
 
 st.set_page_config(page_title="Hierarchy Detector & Validator", layout="wide")
 
 
 def main() -> None:
-    st.title("📊 Hierarchy Detector & Validator")
+    render_header_with_version("📊 Hierarchy Detector & Validator")
     st.markdown(
-        "Upload one or more CSV files below to check column-based hierarchies "
+        "Click 'Upload CSV file(s)' below to check column-based hierarchies "
         "(e.g. *Country → State → City*). For each file you can:\n"
         "- 🔍 **Detect Hierarchy** — automatically finds likely parent/child column chains "
         "and scores how well the data complies with each one.\n"
@@ -23,23 +29,21 @@ def main() -> None:
         "- ✉️ Questions or feedback? Contact us at plugincoe@o9solutions.com"
     )
 
-    uploaded_files = st.file_uploader(
-        "📁 Upload CSV file(s)", type=["csv"], accept_multiple_files=True
-    )
+    render_upload_trigger()
 
-    if not uploaded_files:
-        st.info("Upload at least one CSV file to get started.")
-        render_version_footer()
+    file_sep_pairs = get_uploaded_file_sep_pairs()
+    if not file_sep_pairs:
+        st.info("Click 'Upload CSV file(s)' to get started.")
         return
 
-    entries = collect_uploaded_files(uploaded_files)
+    entries = collect_uploaded_files(file_sep_pairs)
+    if not entries:
+        return
 
     tabs = st.tabs([display_name for _, display_name, _ in entries])
     for tab, (file_key, display_name, df) in zip(tabs, entries):
         with tab:
             render_file_section(file_key, display_name, df)
-
-    render_version_footer()
 
 
 if __name__ == "__main__":

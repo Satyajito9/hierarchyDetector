@@ -14,8 +14,8 @@ from ..core import DetectResult, ValidateResult, detect_hierarchies, validate_hi
 
 
 @st.cache_data(show_spinner=False, max_entries=20, ttl=3600)
-def load_csv(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(file_bytes))
+def load_csv(file_bytes: bytes, filename: str, sep: str) -> pd.DataFrame:
+    return pd.read_csv(io.BytesIO(file_bytes), sep=sep)
 
 
 @st.cache_data(show_spinner="Detecting hierarchies...", max_entries=20, ttl=3600)
