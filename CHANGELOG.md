@@ -8,6 +8,30 @@ and this project uses [Semantic Versioning](https://semver.org/).
 ## [1.2.0] - 2026-08-20
 
 ### Changed
+- Detection and validation no longer run automatically when a file is
+  uploaded. `file_section.py` now shows two always-visible buttons
+  ("🔍 Detect Hierarchy" / "✅ Validate Hierarchy") instead of a radio that
+  rendered its result immediately; the heavy call only runs once one is
+  clicked, and both stay clickable afterwards so mode can be switched at any
+  time. While it runs, a spinner plus a live-ticking elapsed-seconds counter
+  is shown (`hierarchy_detector/ui/timed_run.py`, runs the (cached) `core`
+  call on a background thread while the main thread polls and updates the
+  counter — Streamlit's script context is thread-local, so the worker thread
+  never touches `st.*` itself), both cleared as soon as the result is ready.
+- `detect_hierarchies`'s candidate search (the O(columns^2) pairwise/edge
+  scan) now runs against a random sample (capped at 100,000 rows,
+  fixed seed) instead of the full file when the file has more rows than
+  that, then recomputes the final selected hierarchy/hierarchies'
+  compliance numbers against the full file — bounds the search cost on
+  very large files without changing the accuracy of the displayed
+  compliance %/bad records (`hierarchy_detector/core/detect.py`).
+  Near-misses are still reported from the sample (diagnostic-only, not
+  part of the displayed compliance numbers).
+- `render_detect` now shows a non-blocking warning when a file has more
+  than 30 columns, since column count is the dimension detection scales
+  worse with (`hierarchy_detector/ui/detect_view.py`).
+
+### Changed
 - `evaluate_chain`/`pairwise_symmetric_compliance` now accept a shared
   column -> `astype(str)` cache (`hierarchy_detector/core/compliance.py`,
   threaded through `detect.py`/`levels.py`/`validate.py`), so each eligible

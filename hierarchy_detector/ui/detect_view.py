@@ -10,6 +10,7 @@ from .chain_view import render_chain_result
 from .data_loading import cached_detect
 from .formatting import chain_summary_label
 from .reports import render_consolidated_bad_records
+from .timed_run import run_with_live_timer
 
 MAX_HIERARCHIES_TO_FIND = 8
 
@@ -18,9 +19,23 @@ MAX_HIERARCHIES_TO_FIND = 8
 # ComplianceResult.overall_compliance_pct) is unaffected by this value.
 DETECT_COMPLIANCE_THRESHOLD = 98.0
 
+# Detection's candidate search is roughly O(columns^2); above this many
+# columns it's still run (there's no hard cap), but the user gets a heads-up
+# that it may take a while.
+COLUMN_COUNT_WARNING_THRESHOLD = 30
+
 
 def render_detect(file_key: str, df: pd.DataFrame) -> None:
-    result = cached_detect(df, DETECT_COMPLIANCE_THRESHOLD, MAX_HIERARCHIES_TO_FIND)
+    if df.shape[1] > COLUMN_COUNT_WARNING_THRESHOLD:
+        st.warning(
+            f"This file has {df.shape[1]} columns — hierarchy detection scales "
+            "roughly quadratically with column count, so this may take a while."
+        )
+
+    result = run_with_live_timer(
+        lambda: cached_detect(df, DETECT_COMPLIANCE_THRESHOLD, MAX_HIERARCHIES_TO_FIND),
+        label="Detecting hierarchies...",
+    )
     profile_map = {p.name: p for p in result.profiles}
 
     if not result.hierarchies:

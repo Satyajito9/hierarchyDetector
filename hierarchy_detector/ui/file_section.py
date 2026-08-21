@@ -20,14 +20,18 @@ def render_file_section(file_key: str, filename: str, df: pd.DataFrame) -> None:
     with st.expander("Column profile"):
         render_column_profile(df)
 
-    mode = st.radio(
-        "What do you want to do?",
-        ["🔍 Detect Hierarchy", "✅ Validate Hierarchy"],
-        key=f"mode_{file_key}",
-        horizontal=True,
-    )
+    active_mode_key = f"active_mode_{file_key}"
 
-    if mode == "🔍 Detect Hierarchy":
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔍 Detect Hierarchy", key=f"detect_btn_{file_key}", width="stretch"):
+            st.session_state[active_mode_key] = "detect"
+    with col2:
+        if st.button("✅ Validate Hierarchy", key=f"validate_btn_{file_key}", width="stretch"):
+            st.session_state[active_mode_key] = "validate"
+
+    active_mode = st.session_state.get(active_mode_key)
+    if active_mode == "detect":
         render_detect(file_key, df)
-    else:
+    elif active_mode == "validate":
         render_validate(file_key, df)

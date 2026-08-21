@@ -16,6 +16,13 @@ from .profiling import ColumnProfile, profile_columns
 
 _MAX_GENERATED_CHAINS = 50  # safety backstop against pathological branching, not a normal-use limit
 
+# The O(columns^2) candidate search (steps 1-3 below) scales linearly with row
+# count; above this many rows it runs against a random sample instead of the
+# full file, then the final selected chain(s) get their compliance numbers
+# recomputed against the FULL file (see the recompute step after step 3).
+_SEARCH_SAMPLE_CAP = 100_000
+_SEARCH_SAMPLE_RANDOM_STATE = 0
+
 
 @dataclass
 class ChainResult:
@@ -37,6 +44,26 @@ class DetectResult:
     unused_columns: List[str]
     excluded_columns: List[Tuple[str, str]]  # (column, reason)
     profiles: List[ColumnProfile]
+
+
+def _recompute_chain_on_full_data(
+    df: pd.DataFrame, chain: ChainResult, str_cache: Dict[str, pd.Series]
+) -> ChainResult:
+    """Rebuilds a chain's levels (same columns, same order) with
+    ancestor_compliance/parallel_evidence recomputed against `df`, for a
+    chain whose structure was found via a row sample (see
+    _SEARCH_SAMPLE_CAP)."""
+    chain_repr: List[str] = []
+    new_levels: List[LevelResult] = []
+    for level in chain.levels:
+        representative = level.representative
+        ancestor_compliance = (
+            None if not chain_repr else evaluate_chain(df, chain_repr + [representative], str_cache)[-1]
+        )
+        extras = [extra for extra, _, _ in level.parallel_evidence]
+        new_levels.append(build_level(df, [representative] + extras, ancestor_compliance, str_cache))
+        chain_repr.append(representative)
+    return ChainResult(levels=new_levels, near_misses=chain.near_misses)
 
 
 def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchies: int = 3) -> DetectResult:
@@ -69,10 +96,20 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
     if len(eligible) < 2:
         return DetectResult(hierarchies=[], unused_columns=eligible, excluded_columns=excluded_columns, profiles=profiles)
 
+    # Steps 1-3 search for candidate chains against `search_df`, which is a
+    # random sample when the file is large (see _SEARCH_SAMPLE_CAP) rather
+    # than the full `df` — this is the dimension confirmed to scale linearly
+    # with row count. The final selected chain(s) get their compliance
+    # numbers recomputed against the full `df` afterwards.
+    if len(df) > _SEARCH_SAMPLE_CAP:
+        search_df = df.sample(n=_SEARCH_SAMPLE_CAP, random_state=_SEARCH_SAMPLE_RANDOM_STATE)
+    else:
+        search_df = df
+
     # Shared across every pairwise/chain check below (the O(columns^2) scan in
     # step 1, the O(groups^2) scan in step 2, and the DFS in step 3) so each
     # eligible column's string conversion happens once, not once per call.
-    str_cache: Dict[str, pd.Series] = {c: df[c].astype(str) for c in eligible}
+    str_cache: Dict[str, pd.Series] = {c: search_df[c].astype(str) for c in eligible}
 
     # --- Step 1: merge columns that are mutually 1:1 into same-level groups ---
     parent = {c: c for c in eligible}
@@ -90,7 +127,7 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
     for a, b in combinations(eligible, 2):
         if not _cardinalities_close(profile_map[a].distinct_count, profile_map[b].distinct_count):
             continue
-        fwd, rev = pairwise_symmetric_compliance(df, a, b, str_cache)
+        fwd, rev = pairwise_symmetric_compliance(search_df, a, b, str_cache)
         if fwd.compliance_pct >= threshold and rev.compliance_pct >= threshold:
             union(a, b)
 
@@ -118,7 +155,7 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
             rb = node_repr(nb)
             if profile_map[ra].distinct_count > profile_map[rb].distinct_count:
                 continue
-            compliance = evaluate_chain(df, [ra, rb], str_cache)[-1].compliance_pct
+            compliance = evaluate_chain(search_df, [ra, rb], str_cache)[-1].compliance_pct
             if compliance >= threshold:
                 direct_edges[na].append(nb)
 
@@ -158,7 +195,7 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
         own_failures: List[Tuple[str, float, float, str]] = []
         for child in reduced_edges[node]:
             child_repr = node_repr(child)
-            result = evaluate_chain(df, chain_repr + [child_repr], str_cache)[-1]
+            result = evaluate_chain(search_df, chain_repr + [child_repr], str_cache)[-1]
             if result.compliance_pct >= threshold:
                 successful_children.append((child, result))
             else:
@@ -172,13 +209,13 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
         for child, result in successful_children:
             if len(all_chains) >= _MAX_GENERATED_CHAINS:
                 break
-            child_level = build_level(df, node_cols[child], result, str_cache)
+            child_level = build_level(search_df, node_cols[child], result, str_cache)
             dfs(child, levels + [child_level], chain_repr + [node_repr(child)], near_misses + own_failures)
 
     for root in roots:
         if len(all_chains) >= _MAX_GENERATED_CHAINS:
             break
-        root_level = build_level(df, node_cols[root], None, str_cache)
+        root_level = build_level(search_df, node_cols[root], None, str_cache)
         dfs(root, [root_level], [node_repr(root)], [])
 
     used_cols = {c for chain in all_chains for lvl in chain.levels for c in lvl.columns}
@@ -186,6 +223,18 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
 
     all_chains.sort(key=lambda c: (-len(c.levels), -c.overall.compliance_pct))
     hierarchies = all_chains[:max_hierarchies]
+
+    # If the search ran against a sample, the chosen chains' structure (which
+    # columns, in what order) came from the sample, but their reported
+    # compliance numbers must reflect the FULL file, not just the sample.
+    # Recompute each level's ancestor_compliance/parallel_evidence against
+    # `df`. near_misses are left as computed on the sample — they're
+    # diagnostic-only and never feed the displayed Compliance % of a found
+    # hierarchy.
+    if search_df is not df:
+        full_cols = {c for chain in hierarchies for lvl in chain.levels for c in lvl.columns}
+        full_str_cache: Dict[str, pd.Series] = {c: df[c].astype(str) for c in full_cols}
+        hierarchies = [_recompute_chain_on_full_data(df, chain, full_str_cache) for chain in hierarchies]
 
     return DetectResult(
         hierarchies=hierarchies,

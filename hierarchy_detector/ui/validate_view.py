@@ -12,6 +12,7 @@ from ..core import profile_columns
 from .chain_view import render_chain_result
 from .data_loading import cached_validate
 from .formatting import chain_summary_label
+from .timed_run import run_with_live_timer
 
 
 def render_validate(file_key: str, df: pd.DataFrame) -> None:
@@ -88,7 +89,10 @@ def render_validate(file_key: str, df: pd.DataFrame) -> None:
         st.info("Select columns spanning at least 2 different level numbers to validate a hierarchy.")
         return
 
-    result = cached_validate(df, tuple(tuple(g) for g in level_groups))
+    result = run_with_live_timer(
+        lambda: cached_validate(df, tuple(tuple(g) for g in level_groups)),
+        label="Validating hierarchy...",
+    )
     profile_map = {p.name: p for p in profile_columns(df)}
 
     st.markdown(f"#### Validating: {chain_summary_label(result.levels)}")

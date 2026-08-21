@@ -35,7 +35,7 @@ no business logic or rendering logic lives in `app.py` itself.
 | `app.py` | Entry point / orchestrator only: page config, file-upload wiring, tab layout. Delegates everything else to `hierarchy_detector`. |
 | `hierarchy_detector/__init__.py` | Exposes `__version__`, read from the repo-root `VERSION` file. |
 | `hierarchy_detector/core/` | Pure computation layer — no Streamlit or I/O dependency; independently testable. Split by concern: `profiling.py` (column stats), `compliance.py` (chain compliance calculation), `bad_records.py` (per-row violation reasons), `levels.py` (shared level representation), `detect.py` (automatic hierarchy detection), `validate.py` (user-specified hierarchy validation). |
-| `hierarchy_detector/ui/` | Streamlit rendering layer, one concern per module: `styles.py`/`diagram.py` (hierarchy diagram), `upload_dialog.py` (upload button + modal dialog, file picker and separator block laid out side by side), `separator_picker.py` (single editable-dropdown separator field), `data_loading.py` (cached wrappers around `core`), `upload.py` (upload-to-DataFrame wiring), `formatting.py`, `downloads.py`, `reports.py` (exception reports), `profile_view.py`, `chain_view.py`, `detect_view.py`, `validate_view.py`, `file_section.py`, `header.py` (page title with version subscript). |
+| `hierarchy_detector/ui/` | Streamlit rendering layer, one concern per module: `styles.py`/`diagram.py` (hierarchy diagram), `upload_dialog.py` (upload button + modal dialog, file picker and separator block laid out side by side), `separator_picker.py` (single editable-dropdown separator field), `data_loading.py` (cached wrappers around `core`), `upload.py` (upload-to-DataFrame wiring), `timed_run.py` (runs a cached `core` call on a background thread while showing a spinner + live elapsed-seconds counter), `formatting.py`, `downloads.py`, `reports.py` (exception reports), `profile_view.py`, `chain_view.py`, `detect_view.py`, `validate_view.py`, `file_section.py`, `header.py` (page title with version subscript). |
 | `VERSION` | Single source of truth for the app version — read by `hierarchy_detector/__init__.py`, shown as a subscript next to the page title, and baked into the Docker image label. |
 | `CHANGELOG.md` | Keep-a-Changelog-style history, updated alongside `VERSION` bumps. |
 | `Dockerfile` | Single-stage build (`python:3.11-slim`), installs `requirements.txt`, copies `VERSION`, `hierarchy_detector/`, and `app.py`, exposes port 8501. Takes an `APP_VERSION` build arg set as an OCI image-version label. |
@@ -67,10 +67,23 @@ no business logic or rendering logic lives in `app.py` itself.
    please retry the upload") instead of a page-level error — so it doesn't
    linger in the tab list or get silently re-parsed (and re-reported) on
    every later rerun, and isn't fatal to the rest of the batch.
-3. Results are computed in-process and cached in memory only, keyed by a hash
-   of the inputs (`st.cache_data`, bounded to 20 entries / 1 hour TTL per
-   cached function — added specifically so memory can't grow unbounded under
-   sustained multi-user traffic).
+3. After a file is loaded, nothing further is computed until the user
+   explicitly clicks "🔍 Detect Hierarchy" or "✅ Validate Hierarchy"
+   (`file_section.py`) — both buttons stay visible so the user can switch
+   modes at any point. Whichever mode is clicked runs its (cached) `core`
+   call on a background thread (`timed_run.run_with_live_timer`) while the
+   main thread shows a spinner plus a live-ticking "N.Ns elapsed" counter,
+   both of which disappear once the call returns. Results are cached in
+   memory only, keyed by a hash of the inputs (`st.cache_data`, bounded to
+   20 entries / 1 hour TTL per cached function — added specifically so
+   memory can't grow unbounded under sustained multi-user traffic).
+   Automatic detection's O(columns^2) candidate search (`detect.py`) runs
+   against a random sample when the file has more than 100,000 rows, then
+   recomputes the final selected hierarchy/hierarchies' compliance numbers
+   against the full file — this bounds the search cost on very large files
+   without affecting the accuracy of what's displayed. Files with more than
+   30 columns (the dimension detection scales worse with) get a non-blocking
+   warning that detection may take a while.
 4. Nothing is persisted anywhere. Restarting the process/container clears
    all state. Two different containers never need to share data, a disk
    volume, or a cache store.
