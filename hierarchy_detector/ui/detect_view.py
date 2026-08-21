@@ -3,7 +3,7 @@ discovered hierarchy plus a consolidated exception report."""
 
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
 import streamlit as st
 
 from .chain_view import render_chain_result
@@ -25,7 +25,7 @@ DETECT_COMPLIANCE_THRESHOLD = 98.0
 COLUMN_COUNT_WARNING_THRESHOLD = 30
 
 
-def render_detect(file_key: str, df: pd.DataFrame) -> None:
+def render_detect(file_key: str, df: pl.DataFrame) -> None:
     if df.shape[1] > COLUMN_COUNT_WARNING_THRESHOLD:
         st.warning(
             f"This file has {df.shape[1]} columns — hierarchy detection scales "
@@ -67,7 +67,7 @@ def render_detect(file_key: str, df: pd.DataFrame) -> None:
     if result.excluded_columns:
         with st.expander("Columns excluded from analysis (constant or empty)"):
             st.dataframe(
-                pd.DataFrame(result.excluded_columns, columns=["Column", "Reason"]),
+                pl.DataFrame(result.excluded_columns, schema=["Column", "Reason"], orient="row"),
                 hide_index=True,
                 width='stretch',
             )

@@ -1,6 +1,8 @@
-"""Automatic hierarchy detection: exhaustively enumerate every valid
-top->bottom column chain in a DataFrame, rather than committing to a single
-greedy pick."""
+"""Automatic hierarchy detection (Polars backend) — mirrors
+the pre-migration pandas core/detect.py's algorithm and public API exactly
+(same union-find/graph-reduction/DFS control flow, same row-sampling
+behavior for large files), operating on a pl.DataFrame instead of a
+pd.DataFrame."""
 
 from __future__ import annotations
 
@@ -8,20 +10,15 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, List, Set, Tuple
 
-import pandas as pd
+import polars as pl
 
 from .compliance import ComplianceResult, _cardinalities_close, evaluate_chain, pairwise_symmetric_compliance
 from .levels import LevelResult, build_level
 from .profiling import ColumnProfile, profile_columns
 
-_MAX_GENERATED_CHAINS = 50  # safety backstop against pathological branching, not a normal-use limit
+__all__ = ["ChainResult", "DetectResult", "detect_hierarchies"]
 
-# The O(columns^2) candidate search (steps 1-3 below) scales linearly with row
-# count; above this many rows it runs against a random sample instead of the
-# full file, then the final selected chain(s) get their compliance numbers
-# recomputed against the FULL file (see the recompute step after step 3).
-_SEARCH_SAMPLE_CAP = 100_000
-_SEARCH_SAMPLE_RANDOM_STATE = 0
+_MAX_GENERATED_CHAINS = 50  # safety backstop against pathological branching, not a normal-use limit
 
 
 @dataclass
@@ -45,9 +42,13 @@ class DetectResult:
     excluded_columns: List[Tuple[str, str]]  # (column, reason)
     profiles: List[ColumnProfile]
 
+# See the pre-migration pandas core/detect.py — identical row-sampling behavior.
+_SEARCH_SAMPLE_CAP = 100_000
+_SEARCH_SAMPLE_SEED = 0
+
 
 def _recompute_chain_on_full_data(
-    df: pd.DataFrame, chain: ChainResult, str_cache: Dict[str, pd.Series]
+    df: pl.DataFrame, chain: ChainResult, str_cache: Dict[str, pl.Series]
 ) -> ChainResult:
     """Rebuilds a chain's levels (same columns, same order) with
     ancestor_compliance/parallel_evidence recomputed against `df`, for a
@@ -66,19 +67,9 @@ def _recompute_chain_on_full_data(
     return ChainResult(levels=new_levels, near_misses=chain.near_misses)
 
 
-def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchies: int = 3) -> DetectResult:
-    """Exhaustively enumerate every valid top->bottom column chain, rather than
-    committing to a single greedy pick. Steps:
-      1. Merge columns that are mutually 1:1 into same-level groups.
-      2. Test every remaining pair (broad -> narrow, by ascending cardinality)
-         for an ancestor relationship, and transitive-reduce the resulting
-         graph so only immediate parent/child edges remain (dropping
-         redundant skip-edges like Category->Item when Category->Subcategory
-         ->Brand->Item already holds).
-      3. Walk every root->leaf path in that graph, re-validating the *full*
-         cumulative ancestor path (not just the adjacent pair) at each step,
-         since that check only gets stricter as more ancestors are added.
-    """
+def detect_hierarchies(df: pl.DataFrame, threshold: float = 95.0, max_hierarchies: int = 3) -> DetectResult:
+    """See the pre-migration pandas core/detect.py:detect_hierarchies for the
+    step-by-step algorithm description — identical here, just Polars-backed."""
     profiles = profile_columns(df)
     profile_map = {p.name: p for p in profiles}
     order_index = {c: i for i, c in enumerate(df.columns)}
@@ -96,20 +87,12 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
     if len(eligible) < 2:
         return DetectResult(hierarchies=[], unused_columns=eligible, excluded_columns=excluded_columns, profiles=profiles)
 
-    # Steps 1-3 search for candidate chains against `search_df`, which is a
-    # random sample when the file is large (see _SEARCH_SAMPLE_CAP) rather
-    # than the full `df` — this is the dimension confirmed to scale linearly
-    # with row count. The final selected chain(s) get their compliance
-    # numbers recomputed against the full `df` afterwards.
-    if len(df) > _SEARCH_SAMPLE_CAP:
-        search_df = df.sample(n=_SEARCH_SAMPLE_CAP, random_state=_SEARCH_SAMPLE_RANDOM_STATE)
+    if df.height > _SEARCH_SAMPLE_CAP:
+        search_df = df.sample(n=_SEARCH_SAMPLE_CAP, seed=_SEARCH_SAMPLE_SEED)
     else:
         search_df = df
 
-    # Shared across every pairwise/chain check below (the O(columns^2) scan in
-    # step 1, the O(groups^2) scan in step 2, and the DFS in step 3) so each
-    # eligible column's string conversion happens once, not once per call.
-    str_cache: Dict[str, pd.Series] = {c: search_df[c].astype(str) for c in eligible}
+    str_cache: Dict[str, pl.Series] = {c: search_df[c].cast(pl.Utf8) for c in eligible}
 
     # --- Step 1: merge columns that are mutually 1:1 into same-level groups ---
     parent = {c: c for c in eligible}
@@ -224,16 +207,9 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
     all_chains.sort(key=lambda c: (-len(c.levels), -c.overall.compliance_pct))
     hierarchies = all_chains[:max_hierarchies]
 
-    # If the search ran against a sample, the chosen chains' structure (which
-    # columns, in what order) came from the sample, but their reported
-    # compliance numbers must reflect the FULL file, not just the sample.
-    # Recompute each level's ancestor_compliance/parallel_evidence against
-    # `df`. near_misses are left as computed on the sample — they're
-    # diagnostic-only and never feed the displayed Compliance % of a found
-    # hierarchy.
     if search_df is not df:
         full_cols = {c for chain in hierarchies for lvl in chain.levels for c in lvl.columns}
-        full_str_cache: Dict[str, pd.Series] = {c: df[c].astype(str) for c in full_cols}
+        full_str_cache: Dict[str, pl.Series] = {c: df[c].cast(pl.Utf8) for c in full_cols}
         hierarchies = [_recompute_chain_on_full_data(df, chain, full_str_cache) for chain in hierarchies]
 
     return DetectResult(

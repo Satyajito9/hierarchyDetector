@@ -1,13 +1,13 @@
-"""Per-column profiling: distinct/null counts and simple column classification
-(constant, unique key) shown in the column-profile report and used to decide
-which columns are eligible for hierarchy detection."""
+"""Per-column profiling (Polars backend) — mirrors
+the pre-migration pandas core/profiling.py's public API exactly, operating on a
+pl.DataFrame instead of a pd.DataFrame."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List
 
-import pandas as pd
+import polars as pl
 
 
 @dataclass
@@ -23,14 +23,14 @@ class ColumnProfile:
     is_unique_key: bool
 
 
-def profile_columns(df: pd.DataFrame) -> List[ColumnProfile]:
-    n_rows = len(df)
+def profile_columns(df: pl.DataFrame) -> List[ColumnProfile]:
+    n_rows = df.height
     profiles = []
     for col in df.columns:
         series = df[col]
-        non_null = int(series.notna().sum())
-        null_count = n_rows - non_null
-        distinct_count = int(series.nunique(dropna=True))
+        null_count = int(series.null_count())
+        non_null = n_rows - null_count
+        distinct_count = int(series.drop_nulls().n_unique())
         profiles.append(
             ColumnProfile(
                 name=col,

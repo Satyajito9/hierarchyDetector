@@ -3,11 +3,11 @@ both the detect and validate exception reports."""
 
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
 import streamlit as st
 
 
-def render_download_controls(full_df: pd.DataFrame, exc_df: pd.DataFrame, key_prefix: str) -> None:
+def render_download_controls(full_df: pl.DataFrame, exc_df: pl.DataFrame, key_prefix: str) -> None:
     """Shared download controls: an 'include reason' toggle plus two download
     buttons — full data (every row) or exception rows only — both honoring
     that toggle. Both frames must already carry a 'Bad Record Reason' column."""
@@ -17,8 +17,8 @@ def render_download_controls(full_df: pd.DataFrame, exc_df: pd.DataFrame, key_pr
         key=f"{key_prefix}_dl_include_reason",
         help="On: include the Bad Record Reason column in the download. Off: drop it.",
     )
-    full_export = full_df if include_reason else full_df.drop(columns=["Bad Record Reason"])
-    exc_export = exc_df if include_reason else exc_df.drop(columns=["Bad Record Reason"])
+    full_export = full_df if include_reason else full_df.drop("Bad Record Reason")
+    exc_export = exc_df if include_reason else exc_df.drop("Bad Record Reason")
 
     st.caption(f"{len(full_df):,} rows total · {len(exc_df):,} exception rows")
     # Stacked (not side-by-side columns) so both buttons span the same full
@@ -27,7 +27,7 @@ def render_download_controls(full_df: pd.DataFrame, exc_df: pd.DataFrame, key_pr
     # column while the shorter one didn't.
     st.download_button(
         "Full data",
-        full_export.to_csv(index=False).encode("utf-8"),
+        full_export.write_csv().encode("utf-8"),
         file_name=f"{key_prefix}_full_data.csv",
         mime="text/csv",
         icon="📄",
@@ -36,7 +36,7 @@ def render_download_controls(full_df: pd.DataFrame, exc_df: pd.DataFrame, key_pr
     )
     st.download_button(
         "Exceptions only",
-        exc_export.to_csv(index=False).encode("utf-8"),
+        exc_export.write_csv().encode("utf-8"),
         file_name=f"{key_prefix}_exceptions.csv",
         mime="text/csv",
         icon="⚠️",

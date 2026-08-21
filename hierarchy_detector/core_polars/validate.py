@@ -1,15 +1,18 @@
-"""Validation of a user-specified hierarchy: evaluate a fixed set of levels
-chosen by the user, with no threshold gating (unlike automatic detection)."""
+"""Validation of a user-specified hierarchy (Polars backend) — mirrors
+the pre-migration pandas core/validate.py's public API and semantics, operating
+on a pl.DataFrame."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
 
-import pandas as pd
+import polars as pl
 
 from .compliance import ComplianceResult, evaluate_chain, pairwise_symmetric_compliance
 from .levels import LevelResult
+
+__all__ = ["ValidateResult", "validate_hierarchy"]
 
 
 @dataclass
@@ -25,16 +28,14 @@ class ValidateResult:
         return [c for lvl in self.levels for c in lvl.columns]
 
 
-def validate_hierarchy(df: pd.DataFrame, level_groups: Sequence[Sequence[str]]) -> ValidateResult:
-    """Evaluate a user-specified hierarchy. `level_groups` is ordered top->bottom;
-    each element is a list of one or more columns considered the same level
-    (columns sharing a level are checked pairwise for a 1:1 relationship, but that
-    isn't enforced — the caller decided they belong together)."""
+def validate_hierarchy(df: pl.DataFrame, level_groups: Sequence[Sequence[str]]) -> ValidateResult:
+    """See the pre-migration pandas core/validate.py:validate_hierarchy for the
+    semantics — identical here, just Polars-backed."""
     groups = [list(g) for g in level_groups]
     if len(groups) < 2:
         raise ValueError("A hierarchy needs at least 2 levels")
 
-    str_cache: Dict[str, pd.Series] = {c: df[c].astype(str) for g in groups for c in g}
+    str_cache: Dict[str, pl.Series] = {c: df[c].cast(pl.Utf8) for g in groups for c in g}
 
     levels: List[LevelResult] = []
     chain_repr: List[str] = []

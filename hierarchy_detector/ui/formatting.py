@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import List
 
-from ..core import BadRecordReason, LevelResult
+from ..core_polars import BadRecordReason, LevelResult
 
 # Original-file row number shown to users (`row_num`): the CSV header line is
-# counted as line 1, so the first data row (df index 0) is line 2.
+# counted as line 1, so the first data row (0-based row position 0) is line 2.
 HEADER_LINE_OFFSET = 2
 
 

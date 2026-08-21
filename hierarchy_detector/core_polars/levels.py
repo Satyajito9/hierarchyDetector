@@ -1,14 +1,17 @@
-"""Shared LevelResult representation: one level of a hierarchy, used by both
-the detect and validate modules."""
+"""Shared LevelResult representation (Polars backend) — mirrors
+the pre-migration pandas core/levels.py's public API, operating on a
+pl.DataFrame."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
+import polars as pl
 
 from .compliance import ComplianceResult, pairwise_symmetric_compliance
+
+__all__ = ["LevelResult", "build_level"]
 
 
 @dataclass
@@ -31,10 +34,10 @@ class LevelResult:
 
 
 def build_level(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     node_cols_for_node: List[str],
     ancestor_compliance: Optional[ComplianceResult],
-    str_cache: Optional[Dict[str, pd.Series]] = None,
+    str_cache: Optional[Dict[str, pl.Series]] = None,
 ) -> LevelResult:
     representative = node_cols_for_node[0]
     level = LevelResult(columns=[representative], ancestor_compliance=ancestor_compliance)

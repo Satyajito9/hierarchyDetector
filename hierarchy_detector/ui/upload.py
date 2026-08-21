@@ -5,14 +5,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-import pandas as pd
+import polars as pl
 import streamlit as st
 
 from .data_loading import load_csv
 from .upload_dialog import discard_files
 
 
-def collect_uploaded_files(file_sep_pairs) -> List[Tuple[str, str, pd.DataFrame]]:
+def collect_uploaded_files(file_sep_pairs) -> List[Tuple[str, str, pl.DataFrame]]:
     """Turns a flat list of (uploaded_file, sep) pairs — potentially spanning
     several upload-dialog submissions, each with its own separator — into
     de-duplicated (file_key, display_name, DataFrame) entries. De-duplicates
@@ -24,7 +24,7 @@ def collect_uploaded_files(file_sep_pairs) -> List[Tuple[str, str, pd.DataFrame]
     than a page-level error, so they don't linger or get reprocessed on
     every future rerun."""
     name_counts: Dict[str, int] = {}
-    entries: List[Tuple[str, str, pd.DataFrame]] = []
+    entries: List[Tuple[str, str, pl.DataFrame]] = []
     corrupted: List[Any] = []
     for uf, sep in file_sep_pairs:
         count = name_counts.get(uf.name, 0)

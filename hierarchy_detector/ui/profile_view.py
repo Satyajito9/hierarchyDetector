@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
 import streamlit as st
 
-from ..core import profile_columns
+from ..core_polars import profile_columns
 
 
-def render_column_profile(df: pd.DataFrame) -> None:
+def render_column_profile(df: pl.DataFrame) -> None:
     profiles = profile_columns(df)
     rows = [
         {
@@ -23,4 +23,4 @@ def render_column_profile(df: pd.DataFrame) -> None:
         }
         for p in profiles
     ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+    st.dataframe(pl.DataFrame(rows), hide_index=True, width='stretch')

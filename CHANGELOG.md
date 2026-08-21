@@ -8,6 +8,33 @@ and this project uses [Semantic Versioning](https://semver.org/).
 ## [1.2.0] - 2026-08-20
 
 ### Changed
+- Replaced pandas with [Polars](https://pola.rs/) as the data-processing
+  engine throughout the app — `hierarchy_detector/core/` (pandas) is
+  deleted; `hierarchy_detector/core_polars/` (a full port covering
+  profiling, compliance, bad-record reasons, detect, and validate, with
+  the same public API and algorithm — same union-find/graph-reduction/DFS
+  control flow, same row-sampling behavior for large files) is now the
+  only computation layer. Every UI module that touched a DataFrame
+  directly was migrated too: `data_loading.py` (`pl.read_csv` instead of
+  `pd.read_csv`), `reports.py` (pandas' `df.index`/`.insert()`/`.loc[]`
+  replaced with Polars' `.with_columns()` + positional row selection —
+  `ComplianceResult.violation_index`/`null_excluded_index` are now plain
+  0-based row-position lists rather than a `pd.Index`, which fits Polars'
+  positional indexing directly), `downloads.py` (`.write_csv()` instead of
+  `.to_csv()`), and `validate_view.py`'s column/level-picker editor
+  (rewritten from pandas' nullable `Int64` array + `.loc` assignment to
+  plain Python lists rebuilt into a `pl.Series` — note `st.data_editor`
+  round-trips its `NumberColumn` as `Float64` to represent blank cells,
+  same reason the pandas version needed `.astype("Int64")`; the Polars
+  version casts back with `.cast(pl.Int64, strict=False)`). `pandas` is
+  fully removed from `requirements.txt`.
+  Motivation: benchmarking (`performance_optimization_notes.txt`) showed
+  Polars 7-10x faster than pandas on `detect_hierarchies` at 1M-10M rows,
+  with identical detected hierarchies at every size tested. Verified with
+  `AppTest` (Streamlit's headless testing framework) driving the actual
+  detect and validate flows end to end (including the button-click gate,
+  the threaded live-timer, `st.data_editor`, and the download buttons),
+  not just unit tests of the core functions.
 - Detection and validation no longer run automatically when a file is
   uploaded. `file_section.py` now shows two always-visible buttons
   ("🔍 Detect Hierarchy" / "✅ Validate Hierarchy") instead of a radio that

@@ -6,16 +6,16 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
+import polars as pl
 import streamlit as st
 
-from ..core import ColumnProfile, LevelResult
+from ..core_polars import ColumnProfile, LevelResult
 from .diagram import render_hierarchy_diagram
 from .reports import render_bad_record_table
 
 
 def render_chain_result(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     levels: List[LevelResult],
     profile_map: Dict[str, ColumnProfile],
     key_prefix: str,
@@ -45,12 +45,15 @@ def render_chain_result(
 
     if near_misses:
         with st.expander(f"Columns considered but excluded from this hierarchy ({len(near_misses)})"):
-            nm_df = pd.DataFrame(
-                near_misses, columns=["Column", "Best compliance %", "Avg rows/value", "Reason excluded"]
+            nm_df = pl.DataFrame(
+                near_misses,
+                schema=["Column", "Best compliance %", "Avg rows/value", "Reason excluded"],
+                orient="row",
             )
-            nm_df["Best compliance %"] = nm_df["Best compliance %"].round(1)
-            nm_df["Avg rows/value"] = nm_df["Avg rows/value"].round(1)
-            nm_df = nm_df.sort_values("Best compliance %", ascending=False)
+            nm_df = nm_df.with_columns(
+                pl.col("Best compliance %").round(1),
+                pl.col("Avg rows/value").round(1),
+            ).sort("Best compliance %", descending=True)
             st.dataframe(nm_df, hide_index=True, width='stretch')
 
     if show_bad_records:

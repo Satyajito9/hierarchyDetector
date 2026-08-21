@@ -3,7 +3,7 @@ detect/validate mode switch."""
 
 from __future__ import annotations
 
-import pandas as pd
+import polars as pl
 import streamlit as st
 
 from .detect_view import render_detect
@@ -11,7 +11,7 @@ from .profile_view import render_column_profile
 from .validate_view import render_validate
 
 
-def render_file_section(file_key: str, filename: str, df: pd.DataFrame) -> None:
+def render_file_section(file_key: str, filename: str, df: pl.DataFrame) -> None:
     st.caption(f"{df.shape[0]:,} rows × {df.shape[1]} columns")
 
     with st.expander("Preview data (first 20 rows)"):

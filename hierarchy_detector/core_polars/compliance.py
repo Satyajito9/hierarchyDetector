@@ -1,13 +1,26 @@
-"""Chain compliance calculation — the core statistic behind both detection
-and validation: for a top->bottom column chain, what fraction of rows have
-the leaf value's dominant ancestor combination."""
+"""Chain compliance calculation (Polars backend) — mirrors
+the pre-migration pandas core/compliance.py's public API and semantics, operating
+on a pl.DataFrame instead of a pd.DataFrame.
+
+`ComplianceResult.violation_index`/`null_excluded_index` are plain 0-based
+row-position lists (List[int]) rather than a pd.Index, since Polars has no
+persistent row index — they're only valid against the same pl.DataFrame
+they were computed from."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import pandas as pd
+import polars as pl
+
+__all__ = [
+    "ComplianceResult",
+    "evaluate_chain",
+    "pairwise_symmetric_compliance",
+    "top_violations",
+    "_cardinalities_close",
+]
 
 LOW_SAMPLE_AVG_GROUP_SIZE = 2.0
 
@@ -23,8 +36,8 @@ class ComplianceResult:
     violating_rows: int
     compliance_pct: float
     distinct_leaf_values: int
-    violation_index: pd.Index = field(repr=False)
-    null_excluded_index: pd.Index = field(repr=False)
+    violation_index: List[int] = field(repr=False)
+    null_excluded_index: List[int] = field(repr=False)
 
     @property
     def is_degenerate(self) -> bool:
@@ -32,13 +45,6 @@ class ComplianceResult:
 
     @property
     def overall_compliance_pct(self) -> float:
-        """Compliance against *every* evaluated row, including the ones excluded
-        for a blank chain column (those count as non-compliant here). This is
-        the percentage shown to the user. `compliance_pct` (valid-rows-only,
-        i.e. nulls excluded from both numerator and denominator) remains the
-        internal metric used to decide whether a hierarchy chain qualifies
-        during detection — changing that would make detection threshold
-        gating sensitive to how much null data a chain happens to have."""
         if self.total_rows == 0:
             return 0.0
         return 100.0 * self.compliant_rows / self.total_rows
@@ -49,27 +55,24 @@ class ComplianceResult:
             return 0.0
         return self.valid_rows / self.distinct_leaf_values
 
-    # Might have to remove this, redundant
     @property
     def low_sample_warning(self) -> bool:
-        """True when most leaf values appear ~once, so there's not enough
-        repetition to actually test consistency — a high (or low) compliance
-        score at this level should not be trusted at face value."""
         return not self.is_degenerate and self.avg_group_size < LOW_SAMPLE_AVG_GROUP_SIZE
 
 
 def _compliance_from_key(
-    df: pd.DataFrame,
-    ancestor_key: pd.Series,
-    ancestor_null_mask: pd.Series,
+    df: pl.DataFrame,
+    ancestor_key: pl.Series,
+    ancestor_null_mask: pl.Series,
     ancestors: Tuple[str, ...],
     leaf_col: str,
 ) -> ComplianceResult:
-    total_rows = len(df)
-    leaf_null_mask = df[leaf_col].isna()
+    total_rows = df.height
+    leaf_null_mask = df[leaf_col].is_null()
     valid_mask = ~(ancestor_null_mask | leaf_null_mask)
     valid_rows = int(valid_mask.sum())
-    null_excluded_index = df.index[~valid_mask]
+    row_idx = pl.arange(0, total_rows, eager=True)
+    null_excluded_index = row_idx.filter(~valid_mask).to_list()
 
     if valid_rows == 0:
         return ComplianceResult(
@@ -82,27 +85,32 @@ def _compliance_from_key(
             violating_rows=0,
             compliance_pct=0.0,
             distinct_leaf_values=0,
-            violation_index=pd.Index([]),
+            violation_index=[],
             null_excluded_index=null_excluded_index,
         )
 
-    leaf_valid = df.loc[valid_mask, leaf_col]
-    anc_valid = ancestor_key[valid_mask]
-    tmp = pd.DataFrame({"leaf": leaf_valid.values, "anc": anc_valid.values}, index=leaf_valid.index)
+    leaf_valid = df[leaf_col].filter(valid_mask)
+    anc_valid = ancestor_key.filter(valid_mask)
+    idx_valid = row_idx.filter(valid_mask)
+
+    tmp = pl.DataFrame({"leaf": leaf_valid, "anc": anc_valid, "_idx": idx_valid})
 
     # Vectorized mode-per-group: count (leaf, anc) pairs, then take the
-    # highest-count anc per leaf. Avoids slow groupby-apply with a lambda.
-    pair_counts = tmp.groupby(["leaf", "anc"], sort=False).size().reset_index(name="n")
-    top_idx = pair_counts.groupby("leaf", sort=False)["n"].idxmax()
-    mode_df = pair_counts.loc[top_idx, ["leaf", "anc"]].rename(columns={"anc": "expected"})
-
-    tmp = tmp.merge(mode_df, on="leaf", how="left")
-    tmp.index = leaf_valid.index
+    # highest-count anc per leaf (sort by count desc, then first per leaf
+    # group) — the Polars equivalent of pandas' groupby+idxmax.
+    pair_counts = tmp.group_by(["leaf", "anc"]).len()
+    dominant = (
+        pair_counts.sort("len", descending=True)
+        .group_by("leaf", maintain_order=True)
+        .first()
+        .select(["leaf", pl.col("anc").alias("expected")])
+    )
+    tmp = tmp.join(dominant, on="leaf", how="left")
     compliant_mask = tmp["anc"] == tmp["expected"]
 
     compliant_rows = int(compliant_mask.sum())
     violating_rows = valid_rows - compliant_rows
-    violation_index = tmp.index[~compliant_mask]
+    violation_index = tmp["_idx"].filter(~compliant_mask).to_list()
     compliance_pct = 100.0 * compliant_rows / valid_rows
 
     return ComplianceResult(
@@ -114,42 +122,33 @@ def _compliance_from_key(
         compliant_rows=compliant_rows,
         violating_rows=violating_rows,
         compliance_pct=compliance_pct,
-        distinct_leaf_values=int(tmp["leaf"].nunique()),
+        distinct_leaf_values=int(tmp["leaf"].n_unique()),
         violation_index=violation_index,
         null_excluded_index=null_excluded_index,
     )
 
 
 def evaluate_chain(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     ordered_cols: Sequence[str],
-    str_cache: Optional[Dict[str, pd.Series]] = None,
+    str_cache: Optional[Dict[str, pl.Series]] = None,
 ) -> List[ComplianceResult]:
-    """Evaluate a top->bottom column chain level by level.
-
-    Returns one ComplianceResult per level (from the 2nd column onward),
-    where each result's compliance covers *all* ancestor columns seen so
-    far, not just the immediate parent.
-
-    `str_cache` is an optional column-name -> `df[column].astype(str)` map,
-    shared across many `evaluate_chain` calls against the same `df` (e.g.
-    the O(columns^2) candidate-pair scan in `detect_hierarchies`) so each
-    column's string conversion happens once instead of once per call it
-    appears in. Callers that don't pass one get the old per-call behavior.
-    """
+    """Evaluate a top->bottom column chain level by level. See
+    the pre-migration pandas core/compliance.py:evaluate_chain for the semantics
+    (identical here, just Polars-backed)."""
     if len(ordered_cols) < 2:
         raise ValueError("A hierarchy chain needs at least 2 columns")
 
     results: List[ComplianceResult] = []
     if str_cache is None:
-        str_cache = {c: df[c].astype(str) for c in ordered_cols}
+        str_cache = {c: df[c].cast(pl.Utf8) for c in ordered_cols}
     else:
         for c in ordered_cols:
             if c not in str_cache:
-                str_cache[c] = df[c].astype(str)
+                str_cache[c] = df[c].cast(pl.Utf8)
 
     cumulative_key = str_cache[ordered_cols[0]]
-    cumulative_null_mask = df[ordered_cols[0]].isna()
+    cumulative_null_mask = df[ordered_cols[0]].is_null()
 
     for i in range(1, len(ordered_cols)):
         leaf = ordered_cols[i]
@@ -158,18 +157,18 @@ def evaluate_chain(
         results.append(result)
 
         # Extend the composite ancestor key for the next level.
-        cumulative_key = cumulative_key.str.cat(str_cache[leaf], sep="||")
-        cumulative_null_mask = cumulative_null_mask | df[leaf].isna()
+        cumulative_key = cumulative_key + "||" + str_cache[leaf]
+        cumulative_null_mask = cumulative_null_mask | df[leaf].is_null()
 
     return results
 
 
-def top_violations(df: pd.DataFrame, leaf_col: str, violation_index: pd.Index, top_n: int = 10) -> pd.DataFrame:
+def top_violations(df: pl.DataFrame, leaf_col: str, violation_index: List[int], top_n: int = 10) -> pl.DataFrame:
     """Which leaf values account for the most violating rows."""
     if len(violation_index) == 0:
-        return pd.DataFrame(columns=[leaf_col, "violating_rows"])
-    counts = df.loc[violation_index, leaf_col].value_counts().head(top_n)
-    return counts.rename_axis(leaf_col).reset_index(name="violating_rows")
+        return pl.DataFrame({leaf_col: [], "violating_rows": []})
+    counts = df[leaf_col].gather(violation_index).value_counts().sort("count", descending=True).head(top_n)
+    return counts.rename({"count": "violating_rows"})
 
 
 def _cardinalities_close(a: int, b: int, tolerance: float = 0.9) -> bool:
@@ -185,12 +184,12 @@ def _cardinalities_close(a: int, b: int, tolerance: float = 0.9) -> bool:
 
 
 def pairwise_symmetric_compliance(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     col_a: str,
     col_b: str,
-    str_cache: Optional[Dict[str, pd.Series]] = None,
+    str_cache: Optional[Dict[str, pl.Series]] = None,
 ) -> Tuple[ComplianceResult, ComplianceResult]:
     """Check both directions of a potential 1:1 (same-level) relationship between two columns."""
-    forward = evaluate_chain(df, [col_a, col_b], str_cache)[-1]  # col_a -> col_b
-    reverse = evaluate_chain(df, [col_b, col_a], str_cache)[-1]  # col_b -> col_a
+    forward = evaluate_chain(df, [col_a, col_b], str_cache)[-1]
+    reverse = evaluate_chain(df, [col_b, col_a], str_cache)[-1]
     return forward, reverse

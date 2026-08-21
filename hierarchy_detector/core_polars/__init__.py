@@ -1,6 +1,6 @@
 """
-Core hierarchy detection / validation logic. Pure computation — no Streamlit
-or I/O dependency; independently testable.
+Core hierarchy detection / validation logic — Polars backend. Pure
+computation — no Streamlit or I/O dependency; independently testable.
 
 Hierarchy semantics used throughout this package:
     A chain of columns [C0, C1, ..., Ck] represents a top-down hierarchy
@@ -35,7 +35,7 @@ from .compliance import (
     top_violations,
 )
 from .detect import ChainResult, DetectResult, detect_hierarchies
-from .levels import LevelResult
+from .levels import LevelResult, build_level
 from .profiling import ColumnProfile, profile_columns
 from .validate import ValidateResult, validate_hierarchy
 
@@ -50,6 +50,7 @@ __all__ = [
     "DetectResult",
     "detect_hierarchies",
     "LevelResult",
+    "build_level",
     "ColumnProfile",
     "profile_columns",
     "ValidateResult",

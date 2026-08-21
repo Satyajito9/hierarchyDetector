@@ -10,7 +10,7 @@ reporting compliance % and the exact rows that break it.
 
 There is no database, no persistent storage, and no calls out to any other
 internal or external service. It is a pure compute-and-display tool: a file
-goes in over HTTP, pandas crunches it in memory, results render in the
+goes in over HTTP, Polars crunches it in memory, results render in the
 browser. Nothing is written to disk and nothing survives past the browser
 session / container restart.
 
@@ -21,7 +21,10 @@ session / container restart.
   handles the HTTP/WebSocket server, UI widgets, and browser rendering. The
   `1.45` floor is required for `st.selectbox(accept_new_options=True)`,
   used by the separator control below.
-- pandas (`>=2.0,<3.0`) — all data processing
+- [Polars](https://pola.rs/) (`>=1.30,<2.0`) — all data processing.
+  Replaced pandas on this branch after benchmarking showed a 7-10x speedup
+  on `detect_hierarchies` at 1M-10M rows with identical results (see
+  `performance_optimization_notes.txt`) — no pandas dependency remains.
 - No database, no message queue, no external API calls, no secrets/env vars
   required at runtime
 
@@ -34,8 +37,9 @@ no business logic or rendering logic lives in `app.py` itself.
 |---|---|
 | `app.py` | Entry point / orchestrator only: page config, file-upload wiring, tab layout. Delegates everything else to `hierarchy_detector`. |
 | `hierarchy_detector/__init__.py` | Exposes `__version__`, read from the repo-root `VERSION` file. |
-| `hierarchy_detector/core/` | Pure computation layer — no Streamlit or I/O dependency; independently testable. Split by concern: `profiling.py` (column stats), `compliance.py` (chain compliance calculation), `bad_records.py` (per-row violation reasons), `levels.py` (shared level representation), `detect.py` (automatic hierarchy detection), `validate.py` (user-specified hierarchy validation). |
-| `hierarchy_detector/ui/` | Streamlit rendering layer, one concern per module: `styles.py`/`diagram.py` (hierarchy diagram), `upload_dialog.py` (upload button + modal dialog, file picker and separator block laid out side by side), `separator_picker.py` (single editable-dropdown separator field), `data_loading.py` (cached wrappers around `core`), `upload.py` (upload-to-DataFrame wiring), `timed_run.py` (runs a cached `core` call on a background thread while showing a spinner + live elapsed-seconds counter), `formatting.py`, `downloads.py`, `reports.py` (exception reports), `profile_view.py`, `chain_view.py`, `detect_view.py`, `validate_view.py`, `file_section.py`, `header.py` (page title with version subscript). |
+| `hierarchy_detector/core_polars/` | Pure computation layer (Polars-backed) — no Streamlit or I/O dependency; independently testable. Split by concern: `profiling.py` (column stats), `compliance.py` (chain compliance calculation), `bad_records.py` (per-row violation reasons), `levels.py` (shared level representation), `detect.py` (automatic hierarchy detection), `validate.py` (user-specified hierarchy validation). Named `core_polars` (not `core`) because it started as a benchmarking spike alongside a pandas `core/`; once Polars won the benchmark, `core/` was deleted and this became the only computation layer — the name stuck. |
+| `hierarchy_detector/ui/` | Streamlit rendering layer, one concern per module: `styles.py`/`diagram.py` (hierarchy diagram), `upload_dialog.py` (upload button + modal dialog, file picker and separator block laid out side by side), `separator_picker.py` (single editable-dropdown separator field), `data_loading.py` (cached wrappers around `core_polars`), `upload.py` (upload-to-DataFrame wiring), `timed_run.py` (runs a cached `core_polars` call on a background thread while showing a spinner + live elapsed-seconds counter), `formatting.py`, `downloads.py`, `reports.py` (exception reports), `profile_view.py`, `chain_view.py`, `detect_view.py`, `validate_view.py`, `file_section.py`, `header.py` (page title with version subscript). |
+| `benchmarks/detect_hierarchies_bench.py` | Standalone performance regression check for `core_polars.detect_hierarchies` at large row counts (not part of the installed app). |
 | `VERSION` | Single source of truth for the app version — read by `hierarchy_detector/__init__.py`, shown as a subscript next to the page title, and baked into the Docker image label. |
 | `CHANGELOG.md` | Keep-a-Changelog-style history, updated alongside `VERSION` bumps. |
 | `Dockerfile` | Single-stage build (`python:3.11-slim`), installs `requirements.txt`, copies `VERSION`, `hierarchy_detector/`, and `app.py`, exposes port 8501. Takes an `APP_VERSION` build arg set as an OCI image-version label. |
@@ -60,7 +64,7 @@ no business logic or rendering logic lives in `app.py` itself.
    than overwriting the previous submission) and closes the dialog — so
    re-opening the dialog and uploading more files keeps every file, and its
    analysis state, from earlier submissions in the same session.
-2. The bytes are parsed into a pandas DataFrame **in memory** (`io.BytesIO`,
+2. The bytes are parsed into a Polars DataFrame **in memory** (`pl.read_csv`,
    no temp files written to disk) using the chosen separator. A file that
    fails to parse with it (corrupted/unreadable) is discarded from session
    state and reported with a temporary toast ("'<name>' is corrupted —
@@ -107,15 +111,17 @@ GET /_stcore/health   → 200 OK
 ## Runtime characteristics relevant to a hosting decision
 
 - **CPU-bound, not I/O-bound.** Hierarchy detection is an exhaustive
-  pandas-driven search; cost scales with file size and column count. There
+  Polars-driven search; cost scales with file size and column count. There
   is currently no server-side cap on upload size beyond Streamlit's default
   200 MB limit.
 - **Single process per container, no internal worker pool.** Unlike a
   typical WSGI app (gunicorn with N workers), one `streamlit run` process
   handles all connected sessions for that container via threads. Concurrent
   heavy computations from different users on the *same* container will
-  contend for CPU (Python GIL) — this is a reason to run multiple replicas,
-  not a bug to fix in code.
+  contend for CPU — Polars itself is multithreaded per query (unlike the
+  old pandas engine, which mostly held the GIL), so this contention happens
+  directly across CPU cores now, not just via the Python GIL — this is a
+  reason to run multiple replicas, not a bug to fix in code.
 - **Stateful per-browser-tab WebSocket connection.** Streamlit keeps a live
   WebSocket per open browser tab plus an in-memory `session_state` for that
   tab, both tied to whichever specific container instance first served it.

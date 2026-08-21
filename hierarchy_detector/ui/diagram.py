@@ -7,7 +7,7 @@ from typing import Dict, List
 
 import streamlit as st
 
-from ..core import ColumnProfile, LevelResult
+from ..core_polars import ColumnProfile, LevelResult
 from .styles import BOX_H, BOX_W, HIER_CSS, LINE_COLOR, LINK_COLOR, LINK_W
 
 
