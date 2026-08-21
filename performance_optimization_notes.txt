@@ -1,0 +1,170 @@
+Hierarchy Detector & Validator — Performance Notes (2026-08-20)
+================================================================
+
+Context
+-------
+App feels slow on ~10k-row files; concern that files with millions of rows
+will slow the app down a lot. Investigated whether caching or
+multithreading could help, using real profiling instead of guesswork.
+
+Measured findings
+------------------
+Benchmarked `detect_hierarchies()` on synthetic hierarchical CSVs.
+
+Row-count scaling (fixed at 8 columns):
+    10,000 rows    ->   226 ms
+    100,000 rows   ->  1.5 s
+    1,000,000 rows ->  14 s
+  Roughly LINEAR in row count.
+
+Column-count scaling (fixed at 20,000 rows):
+    8 columns  -> 360 ms
+    18 columns -> 2.2 s
+    28 columns -> 6.4 s
+    48 columns -> 22 s
+  Roughly QUADRATIC in column count (6x columns -> ~60x time).
+
+Takeaway: column count is the more dangerous dimension for this app in
+practice. A wide file (40-50+ columns, common in real business exports)
+will hurt far more than a tall-but-narrow file with millions of rows.
+Root cause: `hierarchy_detector/core/detect.py` exhaustively tests every
+column pair (O(columns^2)) in both the 1:1-merge step and the parent/child
+edge-scan step.
+
+Fix already applied (safe, no behavior change)
+------------------------------------------------
+`cProfile` showed `.astype(str)` conversions eating a real chunk of time:
+`evaluate_chain()` in `hierarchy_detector/core/compliance.py` was
+recomputing the same column's string conversion on every single
+pairwise/chain call it appeared in — for an 8-column file, only 8 unique
+columns needed converting, but it was happening 80 times over the course
+of one `detect_hierarchies()` call.
+
+Fix: threaded a shared `str_cache` dict (column name -> `df[col].astype(str)`)
+through `evaluate_chain`, `pairwise_symmetric_compliance`, `build_level`,
+`detect_hierarchies`, and `validate_hierarchy`, so each column's string
+conversion happens once per detect/validate call instead of once per pair
+that references it.
+
+Result: ~15% faster across all benchmarked sizes, identical hierarchy
+detection results (pure memoization, no correctness change). Verified via
+py_compile + a clean headless boot/health check.
+
+Files touched: hierarchy_detector/core/compliance.py, levels.py,
+detect.py, validate.py.
+
+On multithreading — not recommended as the next move
+-----------------------------------------------------
+The per-pair work here is pandas object/string-dtype operations
+(astype(str), groupby on string keys, merge) — these hold the GIL for
+most of their work, unlike numeric NumPy operations, so a
+ThreadPoolExecutor would buy little.
+
+True parallelism would need multiprocessing, which means pickling the
+DataFrame (or relevant columns) to worker processes — non-trivial
+overhead for a multi-million-row DataFrame. Streamlit Community Cloud
+also caps a container at ~2 CPU cores, so the realistic ceiling from
+multiprocessing is ~2x, nowhere near enough to offset a 60x cost increase
+from 6x more columns. Not worth the complexity for the payoff.
+
+Options that would actually move the needle on scaling (NOT yet applied —
+each changes behavior, so they need a decision before implementing)
+---------------------------------------------------------------------
+1. Row sampling for the candidate search only.
+   Run the O(columns^2) pairwise scan (steps 1-2 in detect_hierarchies)
+   against a capped random sample (e.g. 50k-100k rows) instead of the full
+   file, then compute the final compliance/exception numbers for whichever
+   chain(s) get selected against the FULL data. Directly attacks the
+   linear row-count cost where it's most expensive. Low risk to
+   correctness since compliance is inherently a statistical measure — a
+   large-enough random sample should surface the same real relationships
+   as the full file in the vast majority of cases.
+
+2. A column-count guard/warning.
+   Surface a heads-up (or require confirmation) before running exhaustive
+   detection on files with an unusually large number of columns, since
+   that's the dimension that blows up fastest (quadratic).
+
+3. Gate detection behind an explicit button instead of running it eagerly
+   on render (this was already raised in an earlier discussion, still
+   open/unimplemented). Would make Submit on the upload dialog close
+   instantly; the exhaustive-search cost is only paid once the user
+   explicitly asks for it, with a spinner. Doesn't change the algorithm's
+   complexity, but changes when/whether the user has to wait for it.
+
+Recommendation if/when revisited: implement (3) first since it's cheap,
+low-risk, and mostly UX; then (1) if million-row files remain a real use
+case, since it addresses the dimension already confirmed to scale
+linearly and predictably; treat (2) as a cheap complement to either.
+
+Status (2026-08-21): all three implemented — see CHANGELOG.md [1.2.0].
+Detection/validation are now gated behind explicit buttons with a live
+elapsed-seconds counter (option 3); detect_hierarchies samples down to
+100k rows for its candidate search on larger files, recomputing final
+compliance numbers on the full file (option 1); a non-blocking warning
+appears above 30 columns (option 2).
+
+Would switching from pandas to PySpark help? — No, likely worse
+------------------------------------------------------------------
+Question raised: would using PySpark instead of pandas DataFrames make
+detection faster. Answer: no, expect it to make this specific bottleneck
+worse, not better.
+
+Reasoning:
+- The bottleneck is O(columns^2) many-small-calls (hundreds to thousands
+  of individual pairwise groupby+merge calls), not one huge computation.
+  Spark has real per-job overhead — task scheduling, DAG planning, and for
+  PySpark specifically, JVM<->Python serialization on every operation
+  (tens to hundreds of ms per action even in local mode). That overhead
+  would apply to every one of those pairwise calls, whereas pandas does
+  each one in-process in a few ms. Many-small-operations is close to the
+  worst case for Spark and close to the best case for pandas.
+- Spark's advantage only shows up when data doesn't fit comfortably in one
+  machine's memory — realistically tens of millions to billions of rows,
+  multi-GB to TB scale. "Millions of rows" from a browser-uploaded CSV is
+  still comfortably pandas territory (a few hundred MB to low GBs); our
+  own benchmark showed 1M rows taking ~14s with plain pandas — slow enough
+  to want a spinner, not slow enough to need distributed compute.
+- Streamlit Community Cloud has no Spark cluster. PySpark would run in
+  local mode inside the same ~2-core container pandas already runs in —
+  paying Spark's overhead without getting the one thing Spark is for
+  (spreading work across many machines).
+- Switching the DataFrame engine doesn't touch the actual root cause — the
+  O(columns^2) call count is an algorithm property, independent of what
+  executes each call. Row sampling for the candidate search (option 1
+  above) attacks that; swapping pandas for Spark doesn't.
+
+If a faster engine (not distributed) is wanted: Polars would be a more
+fitting comparison than Spark — noticeably faster than pandas for
+string/groupby operations, still single-process/in-container, no cluster,
+and could shave real time off each of the many small calls. Still a real
+migration (rewriting compliance.py/detect.py's pandas calls), so worth
+deciding deliberately — offered to benchmark it against the same
+synthetic datasets before committing to that rewrite, not yet done.
+
+Polars benchmark results (2026-08-21) — migration done
+--------------------------------------------------------
+Built a full Polars port of core/ (hierarchy_detector/core_polars/) on the
+polars_dev branch and benchmarked detect_hierarchies end to end against
+the pandas version, same synthetic data, both engines producing the same
+detected hierarchy at every size:
+
+    1,000,000 rows | pandas   4.04s | polars   0.57s | polars  7.09x faster
+    5,000,000 rows | pandas  15.89s | polars   2.40s | polars  6.63x faster
+   10,000,000 rows | pandas  43.06s | polars   4.09s | polars 10.53x faster
+
+This is a bigger win than the reasoning above predicted — the earlier
+"many small calls is close to pandas' best case" analysis undersold how
+much the row-sampling fix (option 1 above) shifted the bottleneck. Once
+the O(columns^2) search is capped at a 100k-row sample regardless of file
+size, what's left scaling linearly with rows is per-column profiling
+(null/distinct counts) and the final full-data compliance recompute for
+the winning chain — exactly the columnar, multithreaded operations where
+Polars' advantage over pandas compounds with row count.
+
+Decision: migrated fully. `hierarchy_detector/core/` (pandas) is deleted;
+`hierarchy_detector/core_polars/` is now the only computation layer;
+pandas is removed from requirements.txt. See CHANGELOG.md [1.2.0] for the
+full list of files touched, and benchmarks/detect_hierarchies_bench.py
+for the (now Polars-only, pandas comparison no longer possible since
+core/ is gone) ongoing regression benchmark.

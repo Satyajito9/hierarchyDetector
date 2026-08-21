@@ -222,4 +222,4 @@ __marimo__/
 .vscode/
 .devcontainer/
 
-performance_optimization_notes.txt
+test_data/

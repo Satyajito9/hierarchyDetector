@@ -33,7 +33,8 @@ def collect_uploaded_files(file_sep_pairs) -> List[Tuple[str, str, pl.DataFrame]
 
         try:
             df = load_csv(uf.getvalue(), uf.name, sep)
-        except Exception:
+        except Exception as e:
+            st.error(f"Error occurred while processing '{uf.name}': {e}")
             corrupted.append(uf)
             continue
 

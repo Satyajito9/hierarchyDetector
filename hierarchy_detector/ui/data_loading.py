@@ -14,7 +14,7 @@ from ..core_polars import DetectResult, ValidateResult, detect_hierarchies, vali
 
 @st.cache_data(show_spinner=False, max_entries=20, ttl=3600)
 def load_csv(file_bytes: bytes, filename: str, sep: str) -> pl.DataFrame:
-    return pl.read_csv(file_bytes, separator=sep)
+    return pl.read_csv(file_bytes, separator=sep, infer_schema_length=None)
 
 
 @st.cache_data(show_spinner=False, max_entries=20, ttl=3600)
