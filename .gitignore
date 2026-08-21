@@ -221,3 +221,5 @@ __marimo__/
 .claude/
 .vscode/
 .devcontainer/
+
+performance_optimization_notes.txt

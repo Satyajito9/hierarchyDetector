@@ -4,7 +4,7 @@ chosen by the user, with no threshold gating (unlike automatic detection)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import Dict, List, Sequence
 
 import pandas as pd
 
@@ -34,6 +34,8 @@ def validate_hierarchy(df: pd.DataFrame, level_groups: Sequence[Sequence[str]]) 
     if len(groups) < 2:
         raise ValueError("A hierarchy needs at least 2 levels")
 
+    str_cache: Dict[str, pd.Series] = {c: df[c].astype(str) for g in groups for c in g}
+
     levels: List[LevelResult] = []
     chain_repr: List[str] = []
 
@@ -43,11 +45,11 @@ def validate_hierarchy(df: pd.DataFrame, level_groups: Sequence[Sequence[str]]) 
             level = LevelResult(columns=[representative], ancestor_compliance=None)
         else:
             trial = chain_repr + [representative]
-            result = evaluate_chain(df, trial)[-1]
+            result = evaluate_chain(df, trial, str_cache)[-1]
             level = LevelResult(columns=[representative], ancestor_compliance=result)
 
         for extra in group[1:]:
-            fwd, rev = pairwise_symmetric_compliance(df, representative, extra)
+            fwd, rev = pairwise_symmetric_compliance(df, representative, extra, str_cache)
             level.columns.append(extra)
             level.parallel_evidence.append((extra, fwd, rev))
 

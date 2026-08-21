@@ -69,6 +69,11 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
     if len(eligible) < 2:
         return DetectResult(hierarchies=[], unused_columns=eligible, excluded_columns=excluded_columns, profiles=profiles)
 
+    # Shared across every pairwise/chain check below (the O(columns^2) scan in
+    # step 1, the O(groups^2) scan in step 2, and the DFS in step 3) so each
+    # eligible column's string conversion happens once, not once per call.
+    str_cache: Dict[str, pd.Series] = {c: df[c].astype(str) for c in eligible}
+
     # --- Step 1: merge columns that are mutually 1:1 into same-level groups ---
     parent = {c: c for c in eligible}
 
@@ -85,7 +90,7 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
     for a, b in combinations(eligible, 2):
         if not _cardinalities_close(profile_map[a].distinct_count, profile_map[b].distinct_count):
             continue
-        fwd, rev = pairwise_symmetric_compliance(df, a, b)
+        fwd, rev = pairwise_symmetric_compliance(df, a, b, str_cache)
         if fwd.compliance_pct >= threshold and rev.compliance_pct >= threshold:
             union(a, b)
 
@@ -113,7 +118,7 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
             rb = node_repr(nb)
             if profile_map[ra].distinct_count > profile_map[rb].distinct_count:
                 continue
-            compliance = evaluate_chain(df, [ra, rb])[-1].compliance_pct
+            compliance = evaluate_chain(df, [ra, rb], str_cache)[-1].compliance_pct
             if compliance >= threshold:
                 direct_edges[na].append(nb)
 
@@ -153,7 +158,7 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
         own_failures: List[Tuple[str, float, float, str]] = []
         for child in reduced_edges[node]:
             child_repr = node_repr(child)
-            result = evaluate_chain(df, chain_repr + [child_repr])[-1]
+            result = evaluate_chain(df, chain_repr + [child_repr], str_cache)[-1]
             if result.compliance_pct >= threshold:
                 successful_children.append((child, result))
             else:
@@ -167,13 +172,13 @@ def detect_hierarchies(df: pd.DataFrame, threshold: float = 95.0, max_hierarchie
         for child, result in successful_children:
             if len(all_chains) >= _MAX_GENERATED_CHAINS:
                 break
-            child_level = build_level(df, node_cols[child], result)
+            child_level = build_level(df, node_cols[child], result, str_cache)
             dfs(child, levels + [child_level], chain_repr + [node_repr(child)], near_misses + own_failures)
 
     for root in roots:
         if len(all_chains) >= _MAX_GENERATED_CHAINS:
             break
-        root_level = build_level(df, node_cols[root], None)
+        root_level = build_level(df, node_cols[root], None, str_cache)
         dfs(root, [root_level], [node_repr(root)], [])
 
     used_cols = {c for chain in all_chains for lvl in chain.levels for c in lvl.columns}

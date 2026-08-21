@@ -5,7 +5,7 @@ the leaf value's dominant ancestor combination."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -120,18 +120,33 @@ def _compliance_from_key(
     )
 
 
-def evaluate_chain(df: pd.DataFrame, ordered_cols: Sequence[str]) -> List[ComplianceResult]:
+def evaluate_chain(
+    df: pd.DataFrame,
+    ordered_cols: Sequence[str],
+    str_cache: Optional[Dict[str, pd.Series]] = None,
+) -> List[ComplianceResult]:
     """Evaluate a top->bottom column chain level by level.
 
     Returns one ComplianceResult per level (from the 2nd column onward),
     where each result's compliance covers *all* ancestor columns seen so
     far, not just the immediate parent.
+
+    `str_cache` is an optional column-name -> `df[column].astype(str)` map,
+    shared across many `evaluate_chain` calls against the same `df` (e.g.
+    the O(columns^2) candidate-pair scan in `detect_hierarchies`) so each
+    column's string conversion happens once instead of once per call it
+    appears in. Callers that don't pass one get the old per-call behavior.
     """
     if len(ordered_cols) < 2:
         raise ValueError("A hierarchy chain needs at least 2 columns")
 
     results: List[ComplianceResult] = []
-    str_cache = {c: df[c].astype(str) for c in ordered_cols}
+    if str_cache is None:
+        str_cache = {c: df[c].astype(str) for c in ordered_cols}
+    else:
+        for c in ordered_cols:
+            if c not in str_cache:
+                str_cache[c] = df[c].astype(str)
 
     cumulative_key = str_cache[ordered_cols[0]]
     cumulative_null_mask = df[ordered_cols[0]].isna()
@@ -169,8 +184,13 @@ def _cardinalities_close(a: int, b: int, tolerance: float = 0.9) -> bool:
     return (lo / hi) >= tolerance
 
 
-def pairwise_symmetric_compliance(df: pd.DataFrame, col_a: str, col_b: str) -> Tuple[ComplianceResult, ComplianceResult]:
+def pairwise_symmetric_compliance(
+    df: pd.DataFrame,
+    col_a: str,
+    col_b: str,
+    str_cache: Optional[Dict[str, pd.Series]] = None,
+) -> Tuple[ComplianceResult, ComplianceResult]:
     """Check both directions of a potential 1:1 (same-level) relationship between two columns."""
-    forward = evaluate_chain(df, [col_a, col_b])[-1]  # col_a -> col_b
-    reverse = evaluate_chain(df, [col_b, col_a])[-1]  # col_b -> col_a
+    forward = evaluate_chain(df, [col_a, col_b], str_cache)[-1]  # col_a -> col_b
+    reverse = evaluate_chain(df, [col_b, col_a], str_cache)[-1]  # col_b -> col_a
     return forward, reverse

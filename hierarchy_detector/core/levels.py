@@ -4,7 +4,7 @@ the detect and validate modules."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -30,11 +30,16 @@ class LevelResult:
         return len(self.columns) > 1
 
 
-def build_level(df: pd.DataFrame, node_cols_for_node: List[str], ancestor_compliance: Optional[ComplianceResult]) -> LevelResult:
+def build_level(
+    df: pd.DataFrame,
+    node_cols_for_node: List[str],
+    ancestor_compliance: Optional[ComplianceResult],
+    str_cache: Optional[Dict[str, pd.Series]] = None,
+) -> LevelResult:
     representative = node_cols_for_node[0]
     level = LevelResult(columns=[representative], ancestor_compliance=ancestor_compliance)
     for extra in node_cols_for_node[1:]:
-        fwd, rev = pairwise_symmetric_compliance(df, representative, extra)
+        fwd, rev = pairwise_symmetric_compliance(df, representative, extra, str_cache)
         level.columns.append(extra)
         level.parallel_evidence.append((extra, fwd, rev))
     return level

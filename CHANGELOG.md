@@ -7,6 +7,20 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [1.2.0] - 2026-08-20
 
+### Changed
+- `evaluate_chain`/`pairwise_symmetric_compliance` now accept a shared
+  column -> `astype(str)` cache (`hierarchy_detector/core/compliance.py`,
+  threaded through `detect.py`/`levels.py`/`validate.py`), so each eligible
+  column's string conversion happens once per `detect_hierarchies`/
+  `validate_hierarchy` call instead of once per pairwise/chain check that
+  references it. Measured ~15% faster on synthetic benchmarks, no change
+  in results. `detect_hierarchies`'s candidate-pair/edge scan is still
+  O(columns^2) in the number of eligible columns, which dominates over row
+  count for wide files (benchmarked: 8->48 columns at fixed rows was ~60x
+  slower; 10k->1M rows at fixed columns was ~60x slower — comparable, but
+  column count grows the cost per file far more easily in practice) — this
+  fix reduces the constant factor, it doesn't change that scaling.
+
 ### Added
 - `runtime.txt` pinning Python 3.11, so platforms that read it (e.g.
   Streamlit Community Cloud) use the same interpreter version as
